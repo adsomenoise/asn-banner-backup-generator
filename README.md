@@ -480,7 +480,7 @@ npm test            # Run all tests
 npm run test:watch  # Re-run on file changes
 ```
 
-Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`.
+Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`.
 
 Tests cover:
 - ZIP path-traversal safety (`isPathSafe`)
@@ -507,6 +507,8 @@ rive-backup-generator/
 │   ├── jobs/
 │   │   ├── Job.js      # Job + FileInfo model
 │   │   └── JobStore.js # JobStore interface + InMemoryJobStore
+│   ├── storage/
+│   │   └── LocalStorage.js # Job-scoped filesystem storage
 │   ├── index.js        # CLI entry point
 │   ├── webServer.js    # Express web server
 │   ├── captureBackup.js# Playwright screenshot + Sharp compression

@@ -16,11 +16,13 @@ import { parseRivDimensions, generateRiveHTML } from './riveTemplate.js';
 import { createAuthMiddleware } from './auth/middleware.js';
 import { Job, FileInfo } from './jobs/Job.js';
 import { InMemoryJobStore } from './jobs/JobStore.js';
+import { LocalStorage } from './storage/LocalStorage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const TEMP_DIR = path.join(ROOT, 'temp');
-const UPLOAD_DIR = path.join(TEMP_DIR, 'uploads');
+
+const storage = new LocalStorage(TEMP_DIR);
 
 const MAX_CONCURRENT = 3;
 const MAX_UPLOAD_SIZE = 200 * 1024 * 1024;
@@ -60,7 +62,7 @@ function newId() {
 }
 
 async function rmdir(dir) {
-  await fs.remove(dir).catch(() => {});
+  return storage.rmdir(dir);
 }
 
 function isSafeFilename(name) {
@@ -73,21 +75,8 @@ function createFileId(fileName, index) {
   return `${String(index + 1).padStart(3, '0')}-${safeBase}`;
 }
 
-function getJobWorkDir(job) {
-  return path.join(TEMP_DIR, 'work', job.id);
-}
-
 function getFileWorkDir(job, file) {
-  return path.join(getJobWorkDir(job), file.id);
-}
-
-function getServedUrl(port, absolutePath) {
-  const relativePath = path.relative(TEMP_DIR, absolutePath);
-  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-    throw new Error(`Cannot serve path outside temp directory: ${absolutePath}`);
-  }
-  const urlPath = relativePath.split(path.sep).map(encodeURIComponent).join('/');
-  return `http://localhost:${port}/${urlPath}`;
+  return storage.fileWorkDir(job.id, file.id);
 }
 
 function friendlyFileError(fileName, rawMessage) {
@@ -149,8 +138,8 @@ function assertOwnership(job, auth, res) {
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (req, file, cb) => {
-      const dir = path.join(UPLOAD_DIR, req.sessionId);
-      await fs.ensureDir(dir);
+      const dir = storage.uploadDir(req.sessionId);
+      await storage.ensureUploadDir(req.sessionId);
       cb(null, dir);
     },
     filename: (req, file, cb) => {
@@ -183,9 +172,7 @@ function pruneStaleSessions() {
     for (const s of jobs) {
       if (s.status === 'processing') continue;
       if (now - new Date(s.createdAt).getTime() > SESSION_TTL_MS) {
-        rmdir(path.join(UPLOAD_DIR, s.id));
-        rmdir(s.resultDir);
-        rmdir(getJobWorkDir(s));
+        storage.cleanupJob(s.id);
         jobStore.delete(s.id);
       }
     }
@@ -198,8 +185,10 @@ async function processJob(jobId) {
   const job = await jobStore.get(jobId);
   if (!job) return;
 
+  const serveDir = storage.workDir(job.id);
+
   try {
-    fileServer = await startFileServer(3002, TEMP_DIR);
+    fileServer = await startFileServer(3002, serveDir);
   } catch (err) {
     job.setStatus('error');
     job.errors.push({ file: 'server', error: `Failed to start local file server: ${err.message}` });
@@ -238,7 +227,7 @@ async function processJob(jobId) {
           const htmlFile = path.join(creativeDir, `${sanitized}.html`);
           await fs.writeFile(htmlFile, htmlContent);
 
-          const url = getServedUrl(port, htmlFile);
+          const url = storage.toPublicUrl(port, htmlFile, serveDir);
 
           await captureBackup(url, dims, job.resultDir, sanitized, {
             waitTimeout: 15000,
@@ -255,7 +244,7 @@ async function processJob(jobId) {
           const entry = await findBannerEntry(extracted);
           const dimensions = await detectBannerSize(entry, file.path);
 
-          const url = getServedUrl(port, entry);
+          const url = storage.toPublicUrl(port, entry, serveDir);
 
           await captureBackup(url, dimensions, job.resultDir, sanitized, {
             waitTimeout: 15000,
@@ -282,7 +271,7 @@ async function processJob(jobId) {
     const results = (await Promise.all(tasks)).filter(Boolean);
     job.results.push(...results);
 
-    const outputZip = path.join(TEMP_DIR, 'results', `${job.id}.zip`);
+    const outputZip = storage.outputZipPath(job.id);
     const zip = new AdmZip();
 
     for (const result of job.results) {
@@ -337,15 +326,12 @@ async function processJob(jobId) {
 }
 
 async function cleanupJob(job) {
-  await rmdir(job.outputZip).catch(() => {});
-  await rmdir(job.resultDir).catch(() => {});
   for (const result of job.results) {
     if (result.type === 'riv' && result.creativeDir) {
-      await rmdir(result.creativeDir).catch(() => {});
+      await storage.rmdir(result.creativeDir);
     }
   }
-  await rmdir(getJobWorkDir(job)).catch(() => {});
-  await rmdir(path.join(UPLOAD_DIR, job.id)).catch(() => {});
+  await storage.cleanupJob(job.id);
   await jobStore.delete(job.id);
 }
 
@@ -395,8 +381,8 @@ async function handleStartProcessing(req, res) {
   job.setStatus('processing');
   job.results = [];
   job.errors = [];
-  job.resultDir = path.join(TEMP_DIR, 'results', job.id);
-  await fs.ensureDir(job.resultDir);
+  job.resultDir = storage.resultDir(job.id);
+  await storage.ensureResultDir(job.id);
 
   for (const f of job.files) {
     f.setState('queued');
@@ -492,15 +478,34 @@ function handleMulterError(err, req, res, next) {
 // Server bootstrap
 // ---------------------------------------------------------------------------
 
-export async function startWebServer(port = 3001, { auth } = {}) {
+export async function startWebServer(port = 3001, opts = {}) {
   const app = express();
 
-  await fs.ensureDir(UPLOAD_DIR);
+  const corsOrigin = opts.corsOrigin || '*';
+  const rateLimitMax = opts.rateLimitMax || 30;
+
+  await fs.ensureDir(storage.root);
 
   setInterval(pruneStaleSessions, 60_000).unref();
 
+  // -----------------------------------------------------------------------
+  // Security headers
+  // -----------------------------------------------------------------------
+
   app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '0');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
+
+  // -----------------------------------------------------------------------
+  // CORS
+  // -----------------------------------------------------------------------
+
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -510,10 +515,33 @@ export async function startWebServer(port = 3001, { auth } = {}) {
   app.use(express.static(path.join(__dirname, 'public')));
 
   // -----------------------------------------------------------------------
+  // Rate limiter (per-IP, applied to mutation endpoints)
+  // -----------------------------------------------------------------------
+
+  const rateLimitWindow = 60_000;
+  const rateLimitMap = new Map();
+
+  function rateLimiter(req, res, next) {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+
+    if (!rateLimitMap.has(ip)) rateLimitMap.set(ip, []);
+
+    const window = rateLimitMap.get(ip).filter(t => now - t < rateLimitWindow);
+    if (window.length >= rateLimitMax) {
+      return res.status(429).json(errorBody('Too many requests. Please slow down.', 'RATE_LIMITED'));
+    }
+
+    window.push(now);
+    rateLimitMap.set(ip, window);
+    next();
+  }
+
+  // -----------------------------------------------------------------------
   // Auth middleware — applies to all /api/* routes
   // -----------------------------------------------------------------------
 
-  const authMw = createAuthMiddleware(auth || {});
+  const authMw = createAuthMiddleware(opts.auth || {});
 
   // Health endpoint is public (registered before auth middleware)
   app.get('/api/v1/health', handleHealth);
