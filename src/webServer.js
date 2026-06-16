@@ -11,6 +11,7 @@ import { detectBannerSize } from './detectBannerSize.js';
 import { captureBackup } from './captureBackup.js';
 import { createServer as startFileServer, closeServer as stopFileServer } from './localServer.js';
 import { logger } from './logger.js';
+import { metrics } from './metrics.js';
 import { sanitizeFileName } from './utils.js';
 import { parseRivDimensions, generateRiveHTML } from './riveTemplate.js';
 import { createAuthMiddleware } from './auth/middleware.js';
@@ -185,14 +186,19 @@ async function processJob(jobId) {
   const job = await jobStore.get(jobId);
   if (!job) return;
 
+  const log = logger.child({ module: 'processJob', jobId });
+  const jobStart = Date.now();
+
   const serveDir = storage.workDir(job.id);
 
   try {
     fileServer = await startFileServer(3002, serveDir);
   } catch (err) {
+    log.error('Failed to start local file server', { error: err.message });
     job.setStatus('error');
     job.errors.push({ file: 'server', error: `Failed to start local file server: ${err.message}` });
     await jobStore.update(jobId, { status: job.status, errors: job.errors });
+    metrics.increment('job.failed', { reason: 'server_start_error' });
     return;
   }
 
@@ -204,9 +210,17 @@ async function processJob(jobId) {
       const fileWorkDir = getFileWorkDir(job, file);
       let sanitized = '';
       let keepDir = false;
+      const fileLog = log.child({ fileId: file.id, fileName: file.name, fileType: file.type });
 
       try {
         file.setState('processing');
+        fileLog.info('Processing file', { fileType: file.type });
+
+        const captureOpts = {
+          waitTimeout: 15000,
+          strategy: 'auto',
+          debugDir: process.env.RIVE_DEBUG_DIR || null
+        };
 
         if (file.type === 'riv') {
           const base = path.basename(file.name, '.riv');
@@ -229,35 +243,42 @@ async function processJob(jobId) {
 
           const url = storage.toPublicUrl(port, htmlFile, serveDir);
 
-          await captureBackup(url, dims, job.resultDir, sanitized, {
-            waitTimeout: 15000,
-            strategy: 'auto'
-          });
+          fileLog.info('Capturing Rive creative', { dimensions: `${dims.width}x${dims.height}` });
+          const result = await captureBackup(url, dims, job.resultDir, sanitized, captureOpts);
 
           keepDir = true;
           file.setState('complete');
+          metrics.increment('file.complete', { type: 'riv' });
+          fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
           return { name: sanitized, type: 'riv', creativeDir };
         } else {
           const zipName = path.basename(file.name, '.zip');
           sanitized = sanitizeFileName(zipName);
+
+          fileLog.info('Extracting ZIP');
           const extracted = await extractZip(file.path, fileWorkDir, { extractName: 'extracted' });
+
+          fileLog.info('Finding banner entry');
           const entry = await findBannerEntry(extracted);
           const dimensions = await detectBannerSize(entry, file.path);
 
           const url = storage.toPublicUrl(port, entry, serveDir);
 
-          await captureBackup(url, dimensions, job.resultDir, sanitized, {
-            waitTimeout: 15000,
-            strategy: 'auto'
-          });
+          fileLog.info('Capturing ZIP creative', { dimensions: `${dimensions.width}x${dimensions.height}` });
+          const result = await captureBackup(url, dimensions, job.resultDir, sanitized, captureOpts);
 
           keepDir = true;
           file.setState('complete');
+          metrics.increment('file.complete', { type: 'zip' });
+          fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
           return { name: sanitized, type: 'zip', creativeDir: null };
         }
       } catch (err) {
-        file.setState('failed', friendlyFileError(file.name, err.message));
-        job.errors.push({ file: file.name, error: err.message, friendly: file.error });
+        const errorMsg = err.message;
+        fileLog.error('File failed', { error: errorMsg, code: 'FILE_PROCESSING_ERROR' });
+        file.setState('failed', friendlyFileError(file.name, errorMsg));
+        job.errors.push({ file: file.name, error: errorMsg, friendly: file.error });
+        metrics.increment('file.failed', { type: file.type, reason: classifyError(errorMsg) });
         return null;
       } finally {
         globalCap.release();
@@ -270,6 +291,12 @@ async function processJob(jobId) {
 
     const results = (await Promise.all(tasks)).filter(Boolean);
     job.results.push(...results);
+
+    log.info('All files processed', {
+      total: job.files.length,
+      completed: results.length,
+      failed: job.files.length - results.length
+    });
 
     const outputZip = storage.outputZipPath(job.id);
     const zip = new AdmZip();
@@ -315,14 +342,30 @@ async function processJob(jobId) {
       errors: job.errors,
       results: job.results
     });
+
+    const jobDuration = Date.now() - jobStart;
+    log.info('Job complete', { duration: jobDuration, filesTotal: job.files.length, filesOk: results.length, filesFailed: job.files.length - results.length });
+    metrics.timing('job.duration', jobDuration);
+    metrics.increment('job.complete');
   } catch (err) {
-    logger.error(`Failed to build output ZIP for job ${job.id}: ${err.message}`);
+    log.error('Failed to build output ZIP', { error: err.message });
     job.setStatus('error');
     job.errors.push({ file: 'output', error: `Failed to build ZIP: ${err.message}`, friendly: 'Could not package the output files. Try again.' });
     await jobStore.update(jobId, { status: job.status, errors: job.errors });
+    metrics.increment('job.failed', { reason: 'zip_build_error' });
   } finally {
     await stopFileServer(fileServer);
   }
+}
+
+function classifyError(msg) {
+  if (msg.includes('path traversal') || msg.includes('max ')) return 'malformed_creative';
+  if (msg.includes('No .html file')) return 'missing_html';
+  if (msg.includes('dimensions')) return 'invalid_dimensions';
+  if (msg.includes('Failed to load creative') || msg.includes('HTTP ')) return 'creative_load_failure';
+  if (msg.includes('No usable') || msg.includes('blank')) return 'blank_canvas';
+  if (msg.includes('extract')) return 'extraction_error';
+  return 'unknown';
 }
 
 async function cleanupJob(job) {
@@ -340,9 +383,14 @@ async function cleanupJob(job) {
 // ---------------------------------------------------------------------------
 
 async function handleUpload(req, res) {
+  const uploadStart = Date.now();
   const files = req.files || [];
+  const auth = req.auth || {};
+  const log = logger.child({ module: 'handleUpload', userId: auth.userId, tenantId: auth.tenantId, clientId: auth.clientId });
 
   if (files.length === 0) {
+    log.warn('Upload with no files', { code: 'NO_FILES' });
+    metrics.increment('upload.rejected', { reason: 'no_files' });
     return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
   }
 
@@ -355,12 +403,12 @@ async function handleUpload(req, res) {
       fs.readSync(fd, buf, 0, 4, 0);
       fs.closeSync(fd);
       if (!buf.equals(ZIP_MAGIC)) {
+        log.warn('Invalid ZIP magic bytes', { fileName: f.originalname });
+        metrics.increment('upload.rejected', { reason: 'bad_magic' });
         return res.status(400).json(errorBody(`File "${f.originalname}" has invalid ZIP magic bytes`, 'INVALID_FILE_TYPE'));
       }
     }
   }
-
-  const auth = req.auth || {};
 
   const fileInfos = files.map((f, index) => new FileInfo({
     id: createFileId(f.originalname, index),
@@ -380,15 +428,32 @@ async function handleUpload(req, res) {
 
   await jobStore.create(job);
 
+  const uploadDuration = Date.now() - uploadStart;
+  metrics.increment('upload.complete');
+  metrics.timing('upload.duration', uploadDuration);
+  metrics.count('upload.files', files.length);
+  log.info('Upload complete', {
+    jobId: job.id,
+    fileCount: files.length,
+    duration: uploadDuration
+  });
+
   const response = job.toJSON();
   res.status(201).json(response);
 }
 
 async function handleStartProcessing(req, res) {
   const job = await jobStore.get(req.params.jobId);
-  if (!assertOwnership(job, req.auth, res)) return;
+  const auth = req.auth || {};
+  const log = logger.child({ module: 'handleStartProcessing', jobId: req.params.jobId, userId: auth.userId, tenantId: auth.tenantId });
+  if (!assertOwnership(job, auth, res)) {
+    log.warn('Process request for non-owned job');
+    return;
+  }
 
   if (job.status === 'processing') {
+    log.warn('Job already processing');
+    metrics.increment('process.rejected', { reason: 'already_processing' });
     return res.status(409).json(errorBody('Job is already processing', 'ALREADY_PROCESSING'));
   }
 
@@ -410,6 +475,9 @@ async function handleStartProcessing(req, res) {
     resultDir: job.resultDir,
     files: job.files
   });
+
+  metrics.increment('process.started');
+  log.info('Processing started', { fileCount: job.files.length });
 
   const response = job.toJSON();
   res.json(response);
@@ -439,48 +507,69 @@ async function handleGetJobFiles(req, res) {
 }
 
 async function handleDownload(req, res) {
+  const downloadStart = Date.now();
   const job = await jobStore.get(req.params.jobId);
-  if (!assertOwnership(job, req.auth, res)) return;
+  const auth = req.auth || {};
+  const log = logger.child({ module: 'handleDownload', jobId: req.params.jobId, userId: auth.userId });
+  if (!assertOwnership(job, auth, res)) return;
 
   if (job.status !== 'complete') {
+    log.warn('Download requested but job not complete', { status: job.status });
     return res.status(400).json(errorBody('Job is not complete yet', 'NOT_COMPLETE'));
   }
 
   const zipPath = job.outputZip;
   if (!zipPath || !(await fs.pathExists(zipPath))) {
+    log.error('Result file missing', { zipPath });
     return res.status(404).json(errorBody('Result file not found', 'RESULT_NOT_FOUND'));
   }
 
+  metrics.increment('download.started');
+  log.info('Download started');
+
   res.download(zipPath, `backup-images-${job.id}.zip`, async () => {
+    const downloadDuration = Date.now() - downloadStart;
+    metrics.timing('download.duration', downloadDuration);
+    metrics.increment('download.complete');
+    log.info('Download complete', { duration: downloadDuration });
     await cleanupJob(job);
   });
 }
 
 function handleHealth(req, res) {
+  const m = metrics.snapshot();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     version: APP_VERSION,
     uptime: process.uptime(),
-    jobs: jobStore.size
+    jobs: jobStore.size,
+    metrics: {
+      counters: m.counters,
+      timings: m.timings
+    }
   });
 }
 
 function handleMulterError(err, req, res, next) {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
+      metrics.increment('upload.rejected', { reason: 'file_too_large' });
       return res.status(400).json(errorBody('File too large (max 200 MB)', 'FILE_TOO_LARGE'));
     }
     if (err.code === 'LIMIT_FILE_COUNT') {
+      metrics.increment('upload.rejected', { reason: 'too_many_files' });
       return res.status(400).json(errorBody('Too many files (max 50)', 'TOO_MANY_FILES'));
     }
     return res.status(400).json(errorBody(err.message, 'UPLOAD_ERROR'));
   }
   if (err.message) {
     if (err.message === 'Only .zip and .riv files allowed') {
+      metrics.increment('upload.rejected', { reason: 'invalid_type' });
       return res.status(400).json(errorBody(err.message, 'INVALID_FILE_TYPE'));
     }
     if (err.message === 'Unsafe filename rejected') {
+      metrics.increment('upload.rejected', { reason: 'unsafe_filename' });
       return res.status(400).json(errorBody('Filename contains invalid characters', 'UNSAFE_FILENAME'));
     }
     return res.status(400).json(errorBody(err.message, 'BAD_REQUEST'));
@@ -489,11 +578,25 @@ function handleMulterError(err, req, res, next) {
 }
 
 // ---------------------------------------------------------------------------
+// Request timing middleware
+// ---------------------------------------------------------------------------
+
+function requestTimer(req, res, next) {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    metrics.timing('http.request_duration', duration, { method: req.method, path: req.route?.path || req.path, status: String(res.statusCode) });
+  });
+  next();
+}
+
+// ---------------------------------------------------------------------------
 // Server bootstrap
 // ---------------------------------------------------------------------------
 
 export async function startWebServer(port = 3001, opts = {}) {
   const app = express();
+  const log = logger.child({ module: 'webServer' });
 
   const corsOrigin = opts.corsOrigin || '*';
   const rateLimitMax = opts.rateLimitMax || 30;
@@ -529,6 +632,12 @@ export async function startWebServer(port = 3001, opts = {}) {
   app.use(express.static(path.join(__dirname, 'public')));
 
   // -----------------------------------------------------------------------
+  // Request timing middleware
+  // -----------------------------------------------------------------------
+
+  app.use(requestTimer);
+
+  // -----------------------------------------------------------------------
   // Rate limiter (per-IP, applied to mutation endpoints)
   // -----------------------------------------------------------------------
 
@@ -543,6 +652,7 @@ export async function startWebServer(port = 3001, opts = {}) {
 
     const window = rateLimitMap.get(ip).filter(t => now - t < rateLimitWindow);
     if (window.length >= rateLimitMax) {
+      metrics.increment('http.rate_limited');
       return res.status(429).json(errorBody('Too many requests. Please slow down.', 'RATE_LIMITED'));
     }
 
@@ -613,7 +723,7 @@ export async function startWebServer(port = 3001, opts = {}) {
 
   return new Promise((resolve, reject) => {
     const server = app.listen(port, '0.0.0.0', () => {
-      logger.stepSuccess(`Web interface at http://localhost:${port}`);
+      log.stepSuccess(`Web interface at http://localhost:${port}`);
       resolve(server);
     });
     server.on('error', reject);

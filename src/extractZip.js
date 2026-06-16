@@ -2,6 +2,7 @@ import AdmZip from 'adm-zip';
 import fs from 'fs-extra';
 import path from 'path';
 import { logger } from './logger.js';
+import { metrics } from './metrics.js';
 
 const MAX_ENTRIES = 1000;
 const MAX_ENTRY_SIZE = 50 * 1024 * 1024;
@@ -28,6 +29,9 @@ export function isPathSafe(targetPath, extractRoot) {
 }
 
 export async function extractZip(zipPath, tempDir, options = {}) {
+  const log = logger.child({ module: 'extractZip' });
+  const startTime = Date.now();
+
   const zipName = path.basename(zipPath, '.zip');
   const extractName = options.extractName || zipName;
   const tempRoot = path.resolve(tempDir) + path.sep;
@@ -35,6 +39,7 @@ export async function extractZip(zipPath, tempDir, options = {}) {
   const extractRoot = path.resolve(extractPath) + path.sep;
 
   if (!isPathSafe(extractPath, tempRoot)) {
+    log.warn('Unsafe extraction directory', { extractName });
     throw new Error(`Unsafe extraction directory: ${extractName}`);
   }
 
@@ -45,6 +50,8 @@ export async function extractZip(zipPath, tempDir, options = {}) {
     const zipEntries = zip.getEntries();
 
     if (zipEntries.length > MAX_ENTRIES) {
+      log.warn('ZIP exceeds max entries', { entryCount: zipEntries.length, max: MAX_ENTRIES });
+      metrics.increment('extract.rejected', { reason: 'too_many_entries' });
       throw new Error(`ZIP contains ${zipEntries.length} entries (max ${MAX_ENTRIES})`);
     }
 
@@ -60,15 +67,21 @@ export async function extractZip(zipPath, tempDir, options = {}) {
       const targetPath = path.resolve(extractPath, unsafeName);
 
       if (!isPathSafe(targetPath, extractRoot)) {
+        log.warn('Path traversal in ZIP entry', { entryName: entry.entryName });
+        metrics.increment('extract.rejected', { reason: 'path_traversal' });
         throw new Error(`Rejected path traversal in ZIP entry: ${entry.entryName}`);
       }
 
       const data = entry.getData();
       if (data.length > MAX_ENTRY_SIZE) {
+        log.warn('ZIP entry exceeds max size', { entryName: entry.entryName, size: data.length, max: MAX_ENTRY_SIZE });
+        metrics.increment('extract.rejected', { reason: 'entry_too_large' });
         throw new Error(`ZIP entry ${entry.entryName} is ${data.length} bytes (max ${MAX_ENTRY_SIZE})`);
       }
       totalBytes += data.length;
       if (totalBytes > MAX_TOTAL_SIZE) {
+        log.warn('Total extracted size exceeded', { totalBytes, max: MAX_TOTAL_SIZE });
+        metrics.increment('extract.rejected', { reason: 'total_size_exceeded' });
         throw new Error(`Total extracted size exceeds ${MAX_TOTAL_SIZE} bytes`);
       }
 
@@ -77,7 +90,10 @@ export async function extractZip(zipPath, tempDir, options = {}) {
       extractedCount++;
     }
 
-    logger.stepSuccess(`ZIP extracted (${extractedCount} files)`);
+    const duration = Date.now() - startTime;
+    log.stepSuccess(`ZIP extracted (${extractedCount} files)`, { duration, extractedCount, totalBytes });
+    metrics.timing('extract.duration', duration);
+    metrics.increment('extract.complete');
     return extractPath;
 
   } catch (error) {

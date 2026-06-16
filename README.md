@@ -500,6 +500,160 @@ The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the re
 - The local file server serves extracted content without authentication — it is intended only for local Playwright access.
 - Sessions are stored in memory; restarting the web server loses all active and completed sessions.
 
+## Observability
+
+### Structured Logging
+
+All modules emit structured log entries via `src/logger.js`. In development, output is human-readable with colors. In production (set `NODE_ENV=production` or `LOG_FORMAT=json`), each line is a JSON object for ingestion by log aggregators.
+
+#### Common log fields
+
+| Field | Type | Description | Present |
+|---|---|---|---|
+| `timestamp` | ISO 8601 | Event time | Always |
+| `level` | string | `info`, `warn`, `error`, `debug` | Always |
+| `message` | string | Human-readable description | Always |
+| `module` | string | Source module (e.g. `handleUpload`, `processJob`, `captureBackup`, `extractZip`) | Always |
+| `jobId` | string | 8-char hex job identifier | Job-scoped events |
+| `fileId` | string | Per-file identifier (e.g. `001-Banner_300x250`) | Per-file events |
+| `userId` | string | Authenticated user identity | Auth-aware events |
+| `tenantId` | string | Tenant context | Auth-aware events |
+| `clientId` | string | Client/brand context | Auth-aware events |
+| `duration` | number | Elapsed milliseconds | After timed operations |
+| `error` | string | Error message text | On failure |
+| `code` | string | Machine-readable error code | On failure |
+| `fileCount` | number | Number of files in upload/batch | Upload, process events |
+| `strategy` | string | Backup capture strategy name | Capture complete |
+| `dimensions` | string | `{width}x{height}` | Capture events |
+| `browserErrors` | number | Count of captured browser console errors | Capture complete |
+
+#### Log levels
+
+| Level | Usage |
+|---|---|
+| `info` | Normal operational events (upload, process start/complete, capture complete) |
+| `warn` | Recoverable issues (no files uploaded, job already processing, browser errors) |
+| `error` | Failures (file processing error, load failure, ZIP build error) |
+| `debug` | Detailed diagnostics (compression tier attempts) |
+
+#### Creating a child logger
+
+```js
+import { logger } from './logger.js';
+const log = logger.child({ module: 'myModule', jobId, userId });
+log.info('Processing file', { fileId, fileType: 'zip' });
+```
+
+### Metrics
+
+`src/metrics.js` provides a simple in-memory metrics collector for counters and timings. Each metric accepts optional tags for dimensional breakdown.
+
+#### Metric types
+
+| Method | Description | Example |
+|---|---|---|
+| `increment(name, tags?)` | Increment counter by 1 | `metrics.increment('upload.complete')` |
+| `count(name, value, tags?)` | Add arbitrary value to counter | `metrics.count('upload.files', files.length)` |
+| `timing(name, ms, tags?)` | Record a duration | `metrics.timing('extract.duration', 150)` |
+| `startTimer()` / `endTimer(name, start, tags?)` | Convenience timing pair | `const t = metrics.startTimer(); ... metrics.endTimer('job.duration', t)` |
+| `snapshot()` | Return all counters + timing summaries | For health endpoint or periodic export |
+
+#### Exposed counters
+
+| Counter | Tags | When incremented |
+|---|---|---|
+| `upload.complete` | — | Successful upload |
+| `upload.rejected` | `reason` | Upload rejected (no_files, bad_magic, invalid_type, etc.) |
+| `upload.files` | — | Count of files uploaded (via `count()`) |
+| `process.started` | — | Processing started for a job |
+| `process.rejected` | `reason` | Process request rejected (already_processing) |
+| `file.complete` | `type` | File processed successfully |
+| `file.failed` | `type`, `reason` | File processing failed |
+| `job.complete` | — | Job completed successfully |
+| `job.failed` | `reason` | Job failed (server_start_error, zip_build_error) |
+| `extract.complete` | — | ZIP extraction succeeded |
+| `extract.rejected` | `reason` | Extraction rejected (too_many_entries, path_traversal, etc.) |
+| `capture.strategy` | `strategy` | Capture strategy used |
+| `capture.load_error` | — | Creative URL failed to load |
+| `compression.complete` | — | JPEG written to disk |
+| `compression.bytes` | — | Bytes written (via `count()`) |
+| `compression.tier_selected` | `quality` | Quality tier that fit under 80 KB |
+| `download.started` | — | Download initiated |
+| `download.complete` | — | Download finished |
+| `http.rate_limited` | — | Request rate-limited |
+| `http.request_duration` | `method`, `path`, `status` | Per-request duration (via `timing()`) |
+
+#### Exposed timings
+
+| Timing | Tags | Unit |
+|---|---|---|
+| `upload.duration` | — | ms |
+| `job.duration` | — | ms |
+| `extract.duration` | — | ms |
+| `capture.duration` | `strategy` | ms |
+| `compression.duration` | — | ms |
+| `download.duration` | — | ms |
+| `http.request_duration` | `method`, `path`, `status` | ms |
+
+#### Health endpoint
+
+The `/api/v1/health` endpoint includes a `metrics` object with all counters and timing summaries (count, sum, min, max, avg, p50, p95, p99):
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-06-16T13:58:18.000Z",
+  "version": "1.0.0",
+  "uptime": 12345.6,
+  "jobs": 3,
+  "metrics": {
+    "counters": { "upload.complete": 10, "upload.rejected|reason=no_files": 2 },
+    "timings": { "upload.duration": { "count": 10, "sum": 45, "min": 0, ... } }
+  }
+}
+```
+
+### Browser Error Capture
+
+During Playwright screenshot capture, the system listens for:
+
+- **Console errors** (`page.on('console')`): Captured when `msg.type()` is `error` or `warning`, up to 500 characters of text, including source location.
+- **Page errors** (`page.on('pageerror')`): Unhandled JavaScript exceptions, up to 500 characters of message and 5 stack frames (1,000 chars total).
+
+Browser errors are included in the capture result's `browserErrors` array and logged at `warn` level with a count. The errors themselves are NOT logged (to avoid exposing creative contents) — only the count is surfaced in structured logs.
+
+### Debug Artifacts
+
+Set `RIVE_DEBUG_DIR` environment variable to a directory path to save debug artifacts on failed captures:
+
+```sh
+export RIVE_DEBUG_DIR=/tmp/rive-debug
+npm run serve
+```
+
+When a file processing fails, the following may be saved:
+
+| File | Content | Size Limit |
+|---|---|---|
+| `{baseName}_errors.json` | JSON array of browser errors | Full |
+| `{baseName}_page.html` | Page HTML at time of failure | First 50 KB |
+
+These artifacts contain creative content and should be handled with appropriate access controls.
+
+### Testing Observability
+
+Run `test/observability.test.js` to verify:
+- Logger child creation and context propagation
+- Logger step/banner/saved methods
+- Metrics increment, count, timing, percentile, reset
+- Health endpoint includes metrics counters and timings
+
+### Adding Custom Metrics
+
+1. Import `metrics` from `./metrics.js`
+2. Call `metrics.increment('my.event')` or `metrics.timing('my.duration', elapsed)`
+3. The value appears in the next `/api/v1/health` response
+
 ## Tests
 
 ```bash
@@ -507,7 +661,7 @@ npm test            # Run all tests
 npm run test:watch  # Re-run on file changes
 ```
 
-Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`, `test/security.test.js`.
+Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`, `test/security.test.js`, `test/observability.test.js`.
 
 Tests cover:
 - ZIP path-traversal safety (`isPathSafe`)
@@ -523,6 +677,7 @@ Tests cover:
 - Job model + store: 48 tests for FileInfo, Job transitions/ownership/toJSON, InMemoryJobStore CRUD/lifecycle
 - Storage isolation: 27 tests for path construction, directory lifecycle, cleanup cross-contamination, URL traversal rejection, result ZIP streaming, stale pruning
 - Security hardening: 14 tests for security headers, CORS configuration, HTML escaping, ZIP magic-byte validation, rate limiting
+- Observability: 16 tests for logger child/context/step methods, metrics increment/timing/percentile/reset, health endpoint metrics exposure
 
 ## Project Structure
 
@@ -549,7 +704,8 @@ rive-backup-generator/
 │   ├── detectBannerSize.js
 │   ├── localServer.js  # Static file server (factory pattern)
 │   ├── riveTemplate.js # Rive HTML template generator
-│   ├── logger.js
+│   ├── logger.js       # Structured logger (JSON / pretty)
+│   ├── metrics.js      # In-memory counters + timings
 │   ├── utils.js
 │   └── public/         # Web UI frontend
 │       ├── index.html

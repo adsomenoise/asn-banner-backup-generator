@@ -1,6 +1,9 @@
 import { chromium } from 'playwright';
 import sharp from 'sharp';
+import fs from 'fs-extra';
+import path from 'path';
 import { logger } from './logger.js';
+import { metrics } from './metrics.js';
 import { delay, getUniqueOutputPath } from './utils.js';
 
 const STRATEGIES = {
@@ -14,21 +17,47 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
   const {
     waitTimeout = 15000,
     quality = 90,
-    strategy = 'auto'
+    strategy = 'auto',
+    debugDir = null
   } = options;
-  
+
+  const log = logger.child({ module: 'captureBackup' });
+  const startTime = Date.now();
+  const browserErrors = [];
+  let usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
+
   const browser = await chromium.launch({
     headless: true,
     args: ['--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
   });
-  
+
   const context = await browser.newContext({
     viewport: { width: dimensions.width, height: dimensions.height },
     deviceScaleFactor: 1
   });
-  
+
   const page = await context.newPage();
-  
+
+  // Capture browser console errors
+  page.on('console', msg => {
+    if (msg.type() === 'error' || msg.type() === 'warning') {
+      browserErrors.push({
+        type: msg.type(),
+        text: msg.text().slice(0, 500),
+        location: msg.location()
+      });
+    }
+  });
+
+  // Capture unhandled JS errors
+  page.on('pageerror', err => {
+    browserErrors.push({
+      type: 'pageerror',
+      text: err.message.slice(0, 500),
+      stack: err.stack ? err.stack.split('\n').slice(0, 5).join('\n').slice(0, 1000) : null
+    });
+  });
+
   await page.addInitScript(() => {
     let _pending = new Map();
     let _id = 0;
@@ -75,16 +104,15 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
     };
     window.__pendingCount = () => _pending.size;
   });
-  
+
   try {
-    let usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
     let backupReady = false;
     let url = baseUrl;
-    
+
     if (strategy === 'auto' || strategy === 'query') {
       url = baseUrl.includes('?') ? `${baseUrl}&backup=1` : `${baseUrl}?backup=1`;
     }
-    
+
     page.setDefaultTimeout(15000);
     try {
       const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
@@ -92,33 +120,35 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
         throw new Error(`HTTP ${response.status()} ${response.statusText()}`);
       }
     } catch (error) {
+      log.error('Failed to load creative', { url: baseUrl, error: error.message, dimensions: `${dimensions.width}x${dimensions.height}` });
+      metrics.increment('capture.load_error');
       throw new Error(`Failed to load creative URL ${url}: ${error.message}`);
     }
     await page.waitForLoadState('load', { timeout: 3000 }).catch(() => {});
-    
+
     if (strategy === 'auto' || strategy === 'query') {
       backupReady = await checkBackupReady(page);
       if (backupReady) {
         usedStrategy = STRATEGIES.QUERY_PARAM;
       }
     }
-    
+
     if (!backupReady && (strategy === 'auto' || strategy === 'generate')) {
       backupReady = await tryGenerateBackupFrame(page);
       if (backupReady) {
         usedStrategy = STRATEGIES.GENERATE_BACKUP_FRAME;
       }
     }
-    
+
     if (!backupReady && (strategy === 'auto' || strategy === 'scrub')) {
       backupReady = await tryRiveInstanceScrub(page);
       if (backupReady) {
         usedStrategy = STRATEGIES.RIVE_INSTANCE_SCRUB;
       }
     }
-    
+
     if (!backupReady) {
-      logger.step('Waiting for content to load...');
+      log.step('Waiting for content to load...');
       await page.evaluate(() => new Promise(r => {
         let n = 0;
         (function poll() {
@@ -145,7 +175,7 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
       let lastHash = null;
       let stable = false;
 
-      logger.step('Advancing animation frames...');
+      log.step('Advancing animation frames...');
 
       while (totalDrained < maxFrames && !stable) {
         const drained = await page.evaluate((n) => window.__drainRAF(n), batchSize);
@@ -153,7 +183,6 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
 
         const hash = await page.evaluate(() => window.__hashViewport());
 
-        // No more pending frames → animation stopped
         if (drained === 0) {
           if (lastHash !== null && hash === lastHash) {
             stable = true;
@@ -161,8 +190,6 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
           break;
         }
 
-        // Fewer frames than batch → animation ended mid-batch
-        // and canvas unchanged since last check
         if (drained < batchSize && lastHash !== null && hash === lastHash) {
           stable = true;
         }
@@ -180,22 +207,46 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
         }
       }
 
-      logger.step(`Stable: ${stable}, frames: ${totalDrained}`);
+      log.step(`Stable: ${stable}, frames: ${totalDrained}`);
       usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
     }
-    
-    logger.stepSuccess(`Backup strategy: ${usedStrategy}`);
+
+    log.stepSuccess(`Backup strategy: ${usedStrategy}`);
+    metrics.increment('capture.strategy', { strategy: usedStrategy });
     await ensureFontsLoaded(page);
-    
+
     const screenshotBuffer = await captureScreenshot(page, dimensions);
     const outputPath = getUniqueOutputPath(outputDir, baseName, '.jpg');
     await processAndSaveImage(screenshotBuffer, outputPath, quality);
-    
-    logger.stepSuccess('Screenshot captured');
-    logger.saved(outputPath);
-    
-    return { path: outputPath, strategy: usedStrategy };
-    
+
+    log.stepSuccess('Screenshot captured');
+    log.saved(outputPath);
+
+    const totalDuration = Date.now() - startTime;
+    metrics.timing('capture.duration', totalDuration, { strategy: usedStrategy });
+
+    log.info('Capture complete', {
+      duration: totalDuration,
+      strategy: usedStrategy,
+      dimensions: `${dimensions.width}x${dimensions.height}`,
+      browserErrors: browserErrors.length
+    });
+
+    if (browserErrors.length > 0) {
+      log.warn('Browser errors during capture', { browserErrors: browserErrors.length });
+      // Save debug artifacts if configured
+      if (debugDir) {
+        await saveDebugArtifacts(page, debugDir, baseName, browserErrors);
+      }
+    }
+
+    return {
+      path: outputPath,
+      strategy: usedStrategy,
+      duration: totalDuration,
+      browserErrors
+    };
+
   } finally {
     await context.close();
     await browser.close();
@@ -217,9 +268,9 @@ async function tryGenerateBackupFrame(page) {
   try {
     const hasFunction = await page.evaluate(() => typeof window.generateBackupFrame === 'function');
     if (!hasFunction) return false;
-    
+
     await page.evaluate(() => window.generateBackupFrame());
-    
+
     return await checkBackupReady(page);
   } catch {
     return false;
@@ -228,11 +279,11 @@ async function tryGenerateBackupFrame(page) {
 
 async function tryRiveInstanceScrub(page) {
   try {
-    const hasRiveInstance = await page.evaluate(() => 
+    const hasRiveInstance = await page.evaluate(() =>
       window.riveInstance && typeof window.riveInstance.scrub === 'function'
     );
     if (!hasRiveInstance) return false;
-    
+
     await page.evaluate(() => {
       try {
         const instance = window.riveInstance;
@@ -244,7 +295,7 @@ async function tryRiveInstanceScrub(page) {
         console.warn('Rive scrub failed:', e);
       }
     });
-    
+
     await delay(1500);
     return await checkBackupReady(page);
   } catch {
@@ -272,6 +323,29 @@ async function captureScreenshot(page, dimensions) {
   });
 }
 
+async function saveDebugArtifacts(page, debugDir, baseName, browserErrors) {
+  try {
+    await fs.ensureDir(debugDir);
+    const base = path.join(debugDir, baseName);
+
+    // Save error metadata
+    await fs.writeFile(
+      `${base}_errors.json`,
+      JSON.stringify(browserErrors, null, 2)
+    );
+
+    // Save page HTML (trimmed to first 50KB)
+    try {
+      const html = await page.content();
+      await fs.writeFile(`${base}_page.html`, html.slice(0, 50_000));
+    } catch (e) {
+      logger.debug('Could not save page HTML for debug', { error: e.message });
+    }
+  } catch (e) {
+    logger.debug('Failed to save debug artifacts', { error: e.message });
+  }
+}
+
 const MAX_FILE_SIZE = 80 * 1024;
 const DEFAULT_QUALITY_TIERS = [95, 80, 65, 50, 35];
 
@@ -290,6 +364,7 @@ export async function processAndSaveImage(buffer, outputPath, preferredQuality) 
   let result = null;
   const seen = new Set();
   const tiers = [];
+  const log = logger.child({ module: 'captureBackup' });
 
   if (preferredQuality && preferredQuality >= 10 && preferredQuality <= 100) {
     tiers.push(preferredQuality);
@@ -299,10 +374,23 @@ export async function processAndSaveImage(buffer, outputPath, preferredQuality) 
     if (!seen.has(q)) tiers.push(q);
   }
 
+  const startTime = Date.now();
+
   for (const q of tiers) {
     result = await sharp(buffer).jpeg(jpegOptions(q)).toBuffer();
-    if (result.length <= MAX_FILE_SIZE) break;
+    log.debug('Compression tier', { quality: q, size: result.length });
+    if (result.length <= MAX_FILE_SIZE) {
+      log.debug('Selected quality tier', { quality: q, size: result.length });
+      metrics.increment('compression.tier_selected', { quality: String(q) });
+      break;
+    }
   }
 
+  const compressionTime = Date.now() - startTime;
+  metrics.timing('compression.duration', compressionTime);
+
   await sharp(result).toFile(outputPath);
+
+  metrics.increment('compression.complete');
+  metrics.count('compression.bytes', result.length);
 }
