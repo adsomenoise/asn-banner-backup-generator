@@ -96,7 +96,8 @@ export class Job {
         completed: this.completedCount,
         failed: this.failedCount,
         results: this.resultsCount
-      }
+      },
+      canRetry: this.failedCount > 0 && (this.status === 'complete' || this.status === 'error')
     };
   }
 }

@@ -197,6 +197,8 @@ describe('API Contract — v1 endpoints', () => {
       assert.ok(body.createdAt);
       assert.ok(Array.isArray(body.files));
       assert.ok(body.progress);
+      assert.ok(body.canRetry !== undefined);
+      assert.strictEqual(body.canRetry, body.status === 'complete' || body.status === 'error' ? body.progress.failed > 0 : false);
 
       // progress fields
       assert.ok(typeof body.progress.total === 'number');

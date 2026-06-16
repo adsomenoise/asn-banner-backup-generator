@@ -36,6 +36,8 @@
   --state-processing: #fbbf24;
   --state-done: #10b981;
   --state-failed: #ef4444;
+  --state-skip-bg: #1f2d1f;
+  --state-skip-text: #6b8e6b;
 }
 
 @media (prefers-color-scheme: light) {
@@ -67,6 +69,8 @@
     --state-processing: #d97706;
     --state-done: #059669;
     --state-failed: #dc2626;
+    --state-skip-bg: #e8f5e8;
+    --state-skip-text: #4a7a4a;
   }
 }
 
@@ -101,8 +105,11 @@ body {
 }
 .drop-zone:hover { border-color: var(--accent); background: var(--bg-hover); }
 .drop-zone.dragover { border-color: var(--accent); background: var(--bg-hover); }
+.drop-zone:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 .drop-zone-icon { margin-bottom: 0.75rem; }
-.drop-zone-icon svg { width: 48px; height: 48px; stroke: var(--text-muted); transition: stroke .2s; }
+.drop-zone-icon svg { width: 48px; height: 48px; stroke: var(--text-muted); transition: stroke .2s; display: block; margin: 0 auto; }
 .drop-zone:hover .drop-zone-icon svg,
 .drop-zone.dragover .drop-zone-icon svg { stroke: var(--accent); }
 .drop-zone-text { font-size: 0.9375rem; color: var(--text-soft); }
@@ -150,6 +157,7 @@ body {
 .state-badge.processing { background: #3b3410; color: var(--state-processing); }
 .state-badge.complete { background: #0c3623; color: var(--state-done); }
 .state-badge.failed { background: #3b1515; color: var(--state-failed); }
+.state-badge.skipped { background: var(--state-skip-bg); color: var(--state-skip-text); }
 
 @media (prefers-color-scheme: light) {
   .state-badge.uploaded { background: #e5e7eb; color: var(--text-soft); }
@@ -157,6 +165,7 @@ body {
   .state-badge.processing { background: #fef3c7; color: var(--state-processing); }
   .state-badge.complete { background: #d1fae5; color: var(--state-done); }
   .state-badge.failed { background: #fee2e2; color: var(--state-failed); }
+  .state-badge.skipped { background: var(--state-skip-bg); color: var(--state-skip-text); }
 }
 
 .state-badge .spinner {
@@ -173,6 +182,21 @@ body {
   font-size: 0.75rem; color: var(--state-failed); margin-top: 0.375rem;
   line-height: 1.4; word-break: break-word;
 }
+.file-error-code {
+  display: inline-block; font-family: monospace; font-size: 0.6875rem;
+  background: rgba(239,68,68,0.1); padding: 0 4px; border-radius: 3px;
+  margin-right: 4px;
+}
+
+/* Error summary banner */
+.error-summary {
+  margin-top: 0.75rem; padding: 0.75rem; border-radius: 10px;
+  background: var(--errors-bg); border: 1px solid var(--errors-border);
+  font-size: 0.8125rem; color: var(--state-failed); line-height: 1.5;
+  display: none;
+}
+.error-summary.visible { display: block; }
+.error-summary strong { font-weight: 600; }
 
 /* Actions bar */
 .actions {
@@ -233,18 +257,24 @@ body {
   font-size: 0.9375rem; color: #f3f4f6; text-align: center;
   max-width: 400px; line-height: 1.5; min-height: 3em;
 }
+
+/* Accessibility */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); border: 0;
+}
 </style>
 </head>
 <body>
-<div class="container">
+<div class="container" role="main">
   <div class="logo">
     <h1>Banner Backup Generator</h1>
     <p>Drop your creatives &rarr; get optimised JPG backup images</p>
   </div>
 
-  <div class="drop-zone" id="dropZone">
+  <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Upload ZIP or RIV files">
     <div class="drop-zone-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
         <polyline points="17 8 12 3 7 8" />
         <line x1="12" y1="3" x2="12" y2="15" />
@@ -255,9 +285,11 @@ body {
     </div>
     <div class="drop-zone-hint">ZIP or .riv &middot; multiple allowed</div>
   </div>
-  <input type="file" id="fileInput" multiple accept=".zip,.riv" hidden>
+  <input type="file" id="fileInput" multiple accept=".zip,.riv" hidden aria-hidden="true">
 
-  <div class="file-list" id="fileList"></div>
+  <div class="file-list" id="fileList" role="list" aria-label="Uploaded files"></div>
+
+  <div class="error-summary" id="errorSummary" role="alert"></div>
 
   <div class="actions">
     <div class="actions-col">
@@ -270,20 +302,20 @@ body {
     </div>
   </div>
 
-  <div class="progress-wrap" id="progressWrap">
+  <div class="progress-wrap" id="progressWrap" role="status" aria-live="polite">
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
     <div class="progress-text" id="progressText"></div>
   </div>
 </div>
 
-<div class="overlay" id="overlay">
-  <img src="animation.gif" alt="Processing...">
+<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-label="Processing files">
+  <img src="animation.gif" alt="Processing..." aria-hidden="true">
   <div class="waiting-text" id="waitingText"></div>
 </div>
 
 <script>
 let sessionId = null;
-let sessionFiles = [];    // { id, name, type, state }
+let sessionFiles = [];    // { id, name, type, state, error }
 let polling = false;
 let completed = false;
 
@@ -299,6 +331,7 @@ const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const overlay = document.getElementById('overlay');
 const waitingText = document.getElementById('waitingText');
+const errorSummary = document.getElementById('errorSummary');
 
 const waitingMessages = [
   "Reticulating splines...",
@@ -335,15 +368,64 @@ const waitingMessages = [
 
 let waitingInterval = null;
 
+// ---------------------------------------------------------------------------
+// Drop / file picker
+// ---------------------------------------------------------------------------
+
 dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
 dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFiles(e.dataTransfer.files); });
 fileInput.addEventListener('change', () => handleFiles(fileInput.files));
 
+// ---------------------------------------------------------------------------
+// Error code → user-friendly message map
+// ---------------------------------------------------------------------------
+
+const ERROR_HELP = {
+  NO_FILES: 'Select at least one .zip or .riv file.',
+  INVALID_FILE_TYPE: 'Only .zip (banner HTML creatives) and .riv (Rive animation) files are accepted.',
+  UNSAFE_FILENAME: 'The file name contains invalid characters. Rename it and try again.',
+  FILE_TOO_LARGE: 'The file exceeds the 200 MB size limit. Compress or split it.',
+  RATE_LIMITED: 'Too many requests. Wait a moment and try again.',
+  NOTHING_TO_RETRY: 'There are no failed files to retry.',
+  INVALID_STATE: 'The job cannot be retried in its current state.',
+  BAD_REQUEST: 'The request was malformed. Try uploading again.',
+  UPLOAD_ERROR: 'The upload could not be processed. Try again.',
+  ALREADY_PROCESSING: 'This job is already being processed. Wait for it to complete.',
+};
+
+const ERROR_LABELS = {
+  NO_FILES: 'No files',
+  INVALID_FILE_TYPE: 'Unsupported type',
+  UNSAFE_FILENAME: 'Unsafe name',
+  FILE_TOO_LARGE: 'File too large',
+  RATE_LIMITED: 'Rate limited',
+  NOTHING_TO_RETRY: 'Nothing to retry',
+  MALFORMED_CREATIVE: 'Malformed creative',
+  MISSING_HTML: 'Missing HTML',
+  INVALID_DIMENSIONS: 'Invalid dimensions',
+  CREATIVE_LOAD_FAILURE: 'Load failure',
+  BLANK_CANVAS: 'Blank canvas',
+  EXTRACTION_ERROR: 'Extraction error',
+  UNKNOWN: 'Error',
+};
+
+function friendlyErrorLabel(code) {
+  return ERROR_LABELS[code] || ERROR_LABELS.UNKNOWN;
+}
+
+// ---------------------------------------------------------------------------
+// File handling
+// ---------------------------------------------------------------------------
+
 function handleFiles(files) {
   const newFiles = Array.from(files).filter(f => /\.(zip|riv)$/i.test(f.name));
-  if (newFiles.length === 0) return alert('Please select .zip or .riv files only');
+  if (newFiles.length === 0) {
+    showToast('Only .zip and .riv files are supported.', 'warn');
+    return;
+  }
 
   if (completed) {
     resetUI();
@@ -357,9 +439,13 @@ function handleFiles(files) {
   trulyNew.forEach(f => form.append('files', f));
 
   processBtn.disabled = true;
+  errorSummary.classList.remove('visible');
 
   fetch('/api/v1/jobs', { method: 'POST', body: form })
-    .then(r => r.json())
+    .then(r => {
+      if (!r.ok) return r.json().then(err => { throw new Error(err.error || 'Upload failed'); });
+      return r.json();
+    })
     .then(data => {
       sessionId = data.jobId;
       const mapped = data.files.map(f => ({
@@ -374,9 +460,13 @@ function handleFiles(files) {
       processBtn.disabled = false;
     })
     .catch(err => {
-      alert('Upload failed: ' + err.message);
+      showToast(err.message, 'error');
     });
 }
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 
 function renderFileList() {
   fileList.classList.add('visible');
@@ -387,23 +477,7 @@ function renderFileList() {
     const div = document.createElement('div');
     div.className = 'file-item';
     div.dataset.fileId = f.id;
-
-    let stateHtml = '';
-    if (state === 'uploaded') {
-      stateHtml = `<span class="state-badge uploaded">uploaded</span>`;
-    } else if (state === 'queued') {
-      stateHtml = `<span class="state-badge queued">queued</span>`;
-    } else if (state === 'processing') {
-      stateHtml = `<span class="state-badge processing"><span class="spinner"></span> processing</span>`;
-    } else if (state === 'complete') {
-      stateHtml = `<span class="state-badge complete"><span class="check">&#10003;</span> done</span>`;
-    } else if (state === 'failed') {
-      stateHtml = `<span class="state-badge failed"><span class="cross">&#10007;</span> failed</span>`;
-    }
-
-    const errorHtml = state === 'failed' && f.error
-      ? `<div class="file-error">${escapeHtml(f.error)}</div>`
-      : '';
+    div.setAttribute('role', 'listitem');
 
     div.innerHTML = `
       <div class="file-item-col">
@@ -411,12 +485,28 @@ function renderFileList() {
           <span class="file-type-badge ${ext}">${ext}</span>
           <span class="file-name">${escapeHtml(f.name)}</span>
         </div>
-        ${errorHtml}
+        <div class="file-error" id="err-${escapeHtml(f.id)}"></div>
       </div>
-      ${stateHtml}
+      <span class="state-badge ${state}" id="badge-${escapeHtml(f.id)}">${stateBadgeContent(state)}</span>
     `;
     fileList.appendChild(div);
+
+    if (state === 'failed' && f.error) {
+      showFileError(f.id, f.error);
+    }
   });
+}
+
+function stateBadgeContent(state) {
+  switch (state) {
+    case 'uploaded': return 'uploaded';
+    case 'queued': return 'queued';
+    case 'processing': return '<span class="spinner"></span> processing';
+    case 'complete': return '<span class="check">&#10003;</span> done';
+    case 'failed': return '<span class="cross">&#10007;</span> failed';
+    case 'skipped': return 'skipped';
+    default: return state;
+  }
 }
 
 function updateFileState(fileId, newState, errorMsg) {
@@ -424,33 +514,71 @@ function updateFileState(fileId, newState, errorMsg) {
   if (!f) return;
   f.state = newState;
   if (errorMsg) f.error = errorMsg;
-  const el = fileList.querySelector(`[data-file-id="${fileId}"]`);
-  if (!el) return;
-  const badge = el.querySelector('.state-badge');
-  const existingError = el.querySelector('.file-error');
 
-  let stateHtml = '';
-  if (newState === 'uploaded') stateHtml = `<span class="state-badge uploaded">uploaded</span>`;
-  else if (newState === 'queued') stateHtml = `<span class="state-badge queued">queued</span>`;
-  else if (newState === 'processing') stateHtml = `<span class="state-badge processing"><span class="spinner"></span> processing</span>`;
-  else if (newState === 'complete') stateHtml = `<span class="state-badge complete"><span class="check">&#10003;</span> done</span>`;
-  else if (newState === 'failed') stateHtml = `<span class="state-badge failed"><span class="cross">&#10007;</span> failed</span>`;
-
-  if (badge) badge.outerHTML = stateHtml;
+  const badge = document.getElementById('badge-' + CSS.escape(fileId));
+  if (badge) badge.innerHTML = stateBadgeContent(newState);
+  badge.className = 'state-badge ' + newState;
 
   if (newState === 'failed' && errorMsg) {
-    if (existingError) {
-      existingError.textContent = errorMsg;
-    } else {
-      const errDiv = document.createElement('div');
-      errDiv.className = 'file-error';
-      errDiv.textContent = errorMsg;
-      el.querySelector('.file-item-col').appendChild(errDiv);
-    }
-  } else if (newState !== 'failed' && existingError) {
-    existingError.remove();
+    showFileError(fileId, errorMsg);
+  } else if (newState !== 'failed') {
+    clearFileError(fileId);
   }
 }
+
+function showFileError(fileId, msg) {
+  const el = document.getElementById('err-' + CSS.escape(fileId));
+  if (!el) return;
+  el.textContent = msg;
+}
+
+function clearFileError(fileId) {
+  const el = document.getElementById('err-' + CSS.escape(fileId));
+  if (el) el.textContent = '';
+}
+
+// ---------------------------------------------------------------------------
+// Error summary banner
+// ---------------------------------------------------------------------------
+
+function showErrorSummary(message) {
+  errorSummary.textContent = message;
+  errorSummary.classList.add('visible');
+}
+
+function hideErrorSummary() {
+  errorSummary.textContent = '';
+  errorSummary.classList.remove('visible');
+}
+
+// ---------------------------------------------------------------------------
+// Toast notification (inline, non-blocking)
+// ---------------------------------------------------------------------------
+
+function showToast(message, type) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.setAttribute('role', 'alert');
+  toast.textContent = message;
+  Object.assign(toast.style, {
+    position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+    background: type === 'error' ? '#3b1515' : '#1f2d1f',
+    color: type === 'error' ? '#ef4444' : '#10b981',
+    padding: '12px 20px', borderRadius: '10px', fontSize: '0.875rem',
+    fontWeight: '500', zIndex: '2000', border: '1px solid ' + (type === 'error' ? '#4a1a1a' : '#1f3a1f'),
+    boxShadow: '0 4px 12px rgba(0,0,0,0.3)', maxWidth: '90vw',
+    transition: 'opacity .3s'
+  });
+  document.body.appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 4000);
+}
+
+// ---------------------------------------------------------------------------
+// Polling / status
+// ---------------------------------------------------------------------------
 
 function updateAllFromServer(files) {
   files.forEach(sf => {
@@ -463,33 +591,79 @@ function updateAllFromServer(files) {
   renderFileList();
 }
 
-processBtn.addEventListener('click', async () => {
+// ---------------------------------------------------------------------------
+// Process / Retry / Download / Reset
+// ---------------------------------------------------------------------------
+
+processBtn.addEventListener('click', () => startProcessing());
+
+async function startProcessing() {
   if (!sessionId) return;
 
   processBtn.disabled = true;
   downloadBtn.style.display = 'none';
   retryBtn.style.display = 'none';
   resetBtn.style.display = 'none';
+  hideErrorSummary();
   overlay.classList.add('visible');
   startWaitingText();
   progressWrap.classList.add('visible');
   progressFill.style.width = '0%';
   progressText.textContent = 'Starting...';
 
-  sessionFiles.forEach(f => { f.state = 'queued'; });
+  sessionFiles.forEach(f => { if (f.state === 'uploaded') f.state = 'queued'; });
   renderFileList();
 
   const res = await fetch(`/api/v1/jobs/${sessionId}/process`, { method: 'POST' });
   if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to start' }));
     overlay.classList.remove('visible');
     stopWaitingText();
-    progressText.textContent = 'Failed to start processing';
+    progressText.textContent = err.error || 'Failed to start processing';
+    processBtn.disabled = false;
     return;
   }
 
   polling = true;
   pollStatus();
-});
+}
+
+retryBtn.addEventListener('click', () => startRetry());
+
+async function startRetry() {
+  if (!sessionId) return;
+
+  processBtn.disabled = true;
+  downloadBtn.style.display = 'none';
+  retryBtn.style.display = 'none';
+  resetBtn.style.display = 'none';
+  hideErrorSummary();
+  overlay.classList.add('visible');
+  startWaitingText();
+  progressWrap.classList.add('visible');
+  progressFill.style.width = '0%';
+  progressText.textContent = 'Retrying failed files...';
+
+  const res = await fetch(`/api/v1/jobs/${sessionId}/retry`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Retry failed', code: 'UNKNOWN' }));
+    overlay.classList.remove('visible');
+    stopWaitingText();
+    progressText.textContent = err.error || 'Retry failed';
+
+    // Re-enable appropriate buttons based on previous state
+    const hasSuccess = sessionFiles.some(f => f.state === 'complete');
+    const hasFailures = sessionFiles.some(f => f.state === 'failed');
+    if (hasSuccess) downloadBtn.style.display = 'block';
+    if (hasFailures) retryBtn.style.display = 'block';
+    resetBtn.style.display = 'block';
+    processBtn.disabled = false;
+    return;
+  }
+
+  polling = true;
+  pollStatus();
+}
 
 async function pollStatus() {
   while (polling) {
@@ -503,7 +677,7 @@ async function pollStatus() {
         });
       }
 
-      const done = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : (data.progress ? data.progress.completed + data.progress.failed : 0);
+      const done = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : 0;
       const total = data.progress ? data.progress.total : data.total;
       const pct = total > 0 ? (done / total * 100) : 0;
       progressFill.style.width = Math.min(pct, 100) + '%';
@@ -519,21 +693,24 @@ async function pollStatus() {
         stopWaitingText();
         progressFill.style.width = '100%';
 
-        const successCount = data.progress ? data.progress.results : data.results;
+        const successCount = data.files ? data.files.filter(f => f.state === 'complete').length : 0;
         const failCount = data.files ? data.files.filter(f => f.state === 'failed').length : 0;
 
         if (failCount > 0 && successCount > 0) {
-          progressText.textContent = `Complete — ${successCount} image(s) generated, ${failCount} failed`;
+          progressText.textContent = `Partial success — ${successCount} image(s) generated, ${failCount} failed`;
+          showErrorSummary(`${failCount} file(s) failed. The download ZIP includes an errors.json with details.`);
         } else if (failCount > 0) {
           progressText.textContent = `All ${failCount} file(s) failed`;
+          showErrorSummary('All files failed. Check each file for the specific error.');
         } else {
           progressText.textContent = `Complete — ${successCount} image(s) generated`;
         }
 
         if (successCount > 0) {
           downloadBtn.style.display = 'block';
+          downloadBtn.focus();
         }
-        if (failCount > 0) {
+        if (failCount > 0 && data.canRetry) {
           retryBtn.style.display = 'block';
         }
         resetBtn.style.display = 'block';
@@ -546,6 +723,7 @@ async function pollStatus() {
         overlay.classList.remove('visible');
         stopWaitingText();
         progressText.textContent = 'Processing failed';
+        showErrorSummary('An unexpected error occurred during processing.');
         resetBtn.style.display = 'block';
         polling = false;
         return;
@@ -560,30 +738,48 @@ async function pollStatus() {
   }
 }
 
-downloadBtn.addEventListener('click', () => {
+downloadBtn.addEventListener('click', startDownload);
+
+function startDownload() {
   if (!sessionId) return;
-  window.location.href = `/api/v1/jobs/${sessionId}/download`;
+
   downloadBtn.disabled = true;
   downloadBtn.textContent = 'Downloading...';
-  setTimeout(() => {
-    downloadBtn.textContent = 'Download ZIP';
-    downloadBtn.disabled = false;
-    resetUI();
-  }, 3000);
-});
 
-retryBtn.addEventListener('click', () => {
-  if (!sessionId) return;
-  // Reset failed files back to uploaded for re-processing
-  sessionFiles.forEach(f => {
-    if (f.state === 'failed') {
-      f.state = 'uploaded';
-      delete f.error;
-    }
-  });
-  renderFileList();
-  processBtn.click();
-});
+  // Use a hidden iframe to trigger download without navigation
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = `/api/v1/jobs/${sessionId}/download`;
+  document.body.appendChild(iframe);
+
+  // Poll for the download cookie / track completion via progress
+  const checkComplete = setInterval(() => {
+    fetch(`/api/v1/jobs/${sessionId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.status === 'complete') {
+          // Job still exists → download hasn't triggered cleanup yet
+        } else {
+          // Job was cleaned up (404 or deleted)
+          clearInterval(checkComplete);
+          setTimeout(() => {
+            downloadBtn.textContent = 'Download ZIP';
+            downloadBtn.disabled = false;
+            resetUI();
+          }, 1000);
+        }
+      })
+      .catch(() => {
+        // 404 means job was cleaned up
+        clearInterval(checkComplete);
+        setTimeout(() => {
+          downloadBtn.textContent = 'Download ZIP';
+          downloadBtn.disabled = false;
+          resetUI();
+        }, 1000);
+      });
+  }, 2000);
+}
 
 resetBtn.addEventListener('click', resetUI);
 
@@ -600,7 +796,12 @@ function resetUI() {
   retryBtn.style.display = 'none';
   resetBtn.style.display = 'none';
   progressWrap.classList.remove('visible');
+  hideErrorSummary();
 }
+
+// ---------------------------------------------------------------------------
+// Waiting text
+// ---------------------------------------------------------------------------
 
 function startWaitingText() {
   let i = 0;
@@ -621,6 +822,13 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+// CSS.escape polyfill for older browsers
+if (!CSS.escape) {
+  CSS.escape = function(value) {
+    return String(value).replace(/([^\w-])/g, '\\$1');
+  };
 }
 </script>
 </body>

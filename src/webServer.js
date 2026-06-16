@@ -205,7 +205,9 @@ async function processJob(jobId) {
   const port = fileServer.address().port;
 
   try {
-    const tasks = job.files.map(async (file) => {
+    const tasks = job.files
+      .filter(f => f.state === 'queued')
+      .map(async (file) => {
       await globalCap.acquire();
       const fileWorkDir = getFileWorkDir(job, file);
       let sanitized = '';
@@ -536,6 +538,59 @@ async function handleDownload(req, res) {
   });
 }
 
+async function handleRetry(req, res) {
+  const job = await jobStore.get(req.params.jobId);
+  const auth = req.auth || {};
+  const log = logger.child({ module: 'handleRetry', jobId: req.params.jobId, userId: auth.userId, tenantId: auth.tenantId });
+
+  if (!assertOwnership(job, auth, res)) {
+    log.warn('Retry request for non-owned job');
+    return;
+  }
+
+  if (job.status !== 'complete' && job.status !== 'error') {
+    log.warn('Retry request for non-terminal job', { status: job.status });
+    return res.status(400).json(errorBody('Job must be complete or errored to retry', 'INVALID_STATE'));
+  }
+
+  let retryCount = 0;
+  for (const f of job.files) {
+    if (f.state === 'failed') {
+      f.setState('uploaded');
+      f.setState('queued');
+      retryCount++;
+    }
+  }
+
+  if (retryCount === 0) {
+    log.warn('No files to retry');
+    return res.status(400).json(errorBody('No failed files to retry', 'NOTHING_TO_RETRY'));
+  }
+
+  job.setStatus('processing');
+  job.results = [];
+  job.errors = [];
+  job.resultDir = storage.resultDir(job.id);
+  await storage.ensureResultDir(job.id);
+
+  await jobStore.update(job.id, {
+    status: job.status,
+    updatedAt: job.updatedAt,
+    results: job.results,
+    errors: job.errors,
+    resultDir: job.resultDir,
+    files: job.files
+  });
+
+  metrics.increment('process.started');
+  log.info('Retry started', { fileCount: retryCount });
+
+  const response = job.toJSON();
+  res.json(response);
+
+  processJob(job.id);
+}
+
 function handleHealth(req, res) {
   const m = metrics.snapshot();
   res.json({
@@ -684,6 +739,8 @@ export async function startWebServer(port = 3001, opts = {}) {
   }, upload.array('files'), handleUpload);
 
   v1.post('/jobs/:jobId/process', rateLimiter, handleStartProcessing);
+
+  v1.post('/jobs/:jobId/retry', rateLimiter, handleRetry);
 
   v1.get('/jobs/:jobId', handleGetJob);
 
