@@ -5,7 +5,7 @@ import { logger } from './logger.js';
 import { extractZip, cleanTempDir } from './extractZip.js';
 import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
-import { createServer, closeServer, getServerUrl } from './localServer.js';
+import { createServer, closeServer, getServerUrl, getPort } from './localServer.js';
 import { captureBackup } from './captureBackup.js';
 import { sanitizeFileName } from './utils.js';
 
@@ -63,10 +63,11 @@ async function main() {
   
   logger.info(`Found ${zipFiles.length} ZIP file(s) to process\n`);
   
-  await createServer(options.port, options.tempDir);
-  
+  const fileServer = await createServer(options.port, options.tempDir);
+  const serverPort = getPort(fileServer);
+
   const errors = [];
-  
+
   for (const zipFile of zipFiles) {
     const zipName = path.basename(zipFile, '.zip');
     const sanitizedName = sanitizeFileName(zipName);
@@ -80,7 +81,7 @@ async function main() {
       
       const bannerFolderName = path.basename(extractPath);
       const relativeEntry = path.relative(extractPath, entryPath);
-      const bannerUrl = getServerUrl(bannerFolderName, relativeEntry);
+      const bannerUrl = getServerUrl(serverPort, bannerFolderName, relativeEntry);
       
       logger.step(`Opening: ${bannerUrl}`);
       
@@ -100,7 +101,7 @@ async function main() {
     }
   }
   
-  await closeServer();
+  await closeServer(fileServer);
   
   if (errors.length > 0) {
     const errorsPath = path.join(options.outputDir, 'errors.json');

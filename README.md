@@ -9,7 +9,7 @@ npm install
 npx playwright install chromium
 ```
 
-## Usage
+## Usage — CLI
 
 1. Place banner ZIP files in the `input/` directory
 2. Run:
@@ -27,7 +27,7 @@ node src/index.js \
   --input ./input \
   --output ./output \
   --wait 15000 \
-  --quality 90 \
+  --quality 95 \
   --port 3000 \
   --strategy auto
 ```
@@ -37,9 +37,9 @@ node src/index.js \
 | `--input, -i` | `./input` | Input folder with ZIP files |
 | `--output, -o` | `./output` | Output folder for JPGs |
 | `--wait, -w` | `15000` | Fallback timeout in ms |
-| `--quality, -q` | `90` | JPEG quality (1-100) |
+| `--quality, -q` | `95` | Preferred JPEG quality (10–100); falls back through lower tiers to stay under 80 KB |
 | `--port, -p` | `3000` | Local server port |
-| `--strategy, -s` | `auto` | Backup strategy selection |
+| `--strategy, -s` | `auto` | Backup strategy: `auto`, `query`, `generate`, `scrub` |
 
 ## Usage — Web Interface
 
@@ -55,20 +55,20 @@ Open `http://localhost:3001` in your browser. Drop ZIP files onto the drop zone,
 
 1. Scans `input/` for `.zip` files (CLI) or accepts uploads (web)
 2. Extracts each ZIP to `temp/{zip-name}/`
-3. Locates the only `.html` file automatically (any filename, e.g. `banner.html`, `index.html`, `ad.html`)
+3. Locates the only `.html` file automatically (any filename)
 4. Detects banner dimensions (meta tag > canvas > filename > default 300x250)
 5. Serves the banner via a local HTTP server (no `file://` URLs)
 6. Opens the banner in headless Chromium via Playwright
 7. Applies backup strategies to reach the final visual state
-8. Fast-forwards animations via Playwright's clock API to skip waiting
-9. Captures a JPG screenshot
+8. Fast-forwards animations by draining queued `requestAnimationFrame` callbacks
+9. Captures a PNG screenshot and compresses to JPEG (multi-tier quality, targets ≤80 KB)
 10. Saves to `output/` with optional dedup suffix
 
-## Backup Strategies (Priority Order)
+## Backup Strategies
 
 ### Strategy 1 — Query Parameter (Recommended)
 
-The generator loads the HTML file with `?backup=1` appended (e.g. `banner.html?backup=1`). Rive creatives should check for this parameter and self-render to their final state.
+Loads the HTML with `?backup=1` appended. Rive creatives should check for this parameter and self-render to their final state.
 
 ### Strategy 2 — `window.generateBackupFrame()`
 
@@ -76,57 +76,83 @@ If the page exposes this async function, the generator calls it and waits for `w
 
 ### Strategy 3 — Rive Instance Scrub
 
-If `window.riveInstance` is exposed and has a `scrub` method, the generator attempts to scrub to the final frame. Works for linear animations; unreliable for state machines.
+If `window.riveInstance` is exposed with a `scrub` method, attempts to scrub to the final frame.
 
 ### Strategy 4 — Fallback Timeout
 
-Waits a configurable duration (default 15s) then captures whatever is on screen.
+Drains animation frames, detects canvas stability, then captures whatever is on screen.
 
-## Creative Implementation
+## Security & Production Notes
 
-For reliable backups, add this to your Rive banner:
+### ZIP Safety
 
-```javascript
-const isBackup = new URLSearchParams(location.search).get("backup") === "1";
+- **Path-traversal protection**: extracted entry paths are resolved and verified to stay within the extraction directory; entries such as `/etc/passwd` or `../../etc/shadow` are rejected (see `src/extractZip.js`).
+- **Entry limits**: maximum 1,000 entries per ZIP; any entry exceeding 50 MB rejected; total extracted content capped at 200 MB.
+- **Ignored entries**: `__MACOSX`, `.DS_Store`, dotfiles, and `__`-prefixed files are silently dropped.
+- On extraction failure, the partial output directory is removed immediately.
 
-if (isBackup) {
-  // Disable click handling
-  // Skip intro animations
-  // Set Rive to final visual state
-  window.__BACKUP_READY__ = true;
-}
+### File Uploads (Web UI)
+
+- **Max file size**: 200 MB per file (configurable via `MAX_UPLOAD_SIZE` in `src/webServer.js`).
+- **Max files**: 50 per upload request (configurable via `MAX_UPLOAD_FILES`).
+- **Filename safety**: uploads with `..`, `/`, or `\` in the original name are rejected.
+- **Session TTL**: idle sessions are pruned after 30 minutes.
+
+### Concurrency
+
+- A global semaphore limits concurrent Playwright browser instances to 3 (`MAX_CONCURRENT`).
+- Each session's files are processed in parallel within that limit.
+- The local file server in CLI mode uses a factory pattern (no shared mutable state).
+
+### Quality Settings
+
+The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the requested quality first, then falls back through `[95, 80, 65, 50, 35]` until the output fits in 80 KB. This ensures small output files even if the preferred quality would exceed the limit.
+
+### Error Handling
+
+- Background processing in the web server is wrapped in a try/catch — if any part of the job fails, the session transitions to `error` status (never stuck in `processing`).
+- Temporary files (uploaded ZIPs, extracted directories, result JPGs) are cleaned up on success and failure.
+- Playwright browser contexts are closed reliably via `try/finally` in `captureBackup.js`.
+
+### Known Tradeoffs
+
+- Playwright requires Chromium installed (`npx playwright install chromium`); on Linux, system dependencies are needed (`npx playwright install-deps chromium`).
+- The local file server serves all extracted content without authentication — it is intended only for local use.
+- Sessions are stored in memory; restarting the web server loses all active and completed sessions.
+
+## Tests
+
+```bash
+npm test            # Run all tests
+npm run test:watch  # Re-run on file changes
 ```
 
-Optional helper for Strategy 2:
-
-```javascript
-window.generateBackupFrame = async function () {
-  // Set Rive to final state
-  // Disable all interactivity
-  window.__BACKUP_READY__ = true;
-};
-```
-
-## Output
-
-- JPG files in `output/` named after the ZIP file
-- `errors.json` in `output/` if any banners fail
-- Duplicate names get a `_2`, `_3`, etc. suffix
+Tests cover:
+- ZIP path-traversal safety (`isPathSafe`)
+- ZIP extraction limits and filtering
+- HTML banner discovery
+- Dimension parsing from HTML meta/canvas/div tags and filenames
+- Rive HTML template generation
+- JPEG quality tier fallback
+- Output file deduplication
 
 ## Project Structure
 
 ```
 rive-backup-generator/
-├── input/          # Place ZIP files here
-├── output/         # Generated JPGs
-├── temp/           # Extracted ZIPs (auto-managed)
-├── src/            # Source modules
-│   ├── index.js
-│   ├── extractZip.js
+├── input/              # Place ZIP files here (CLI)
+├── output/             # Generated JPGs (CLI)
+├── temp/               # Extracted ZIPs, uploads, results (auto-managed, gitignored)
+├── test/               # Automated tests
+├── src/
+│   ├── index.js        # CLI entry point
+│   ├── webServer.js    # Express web server
+│   ├── captureBackup.js# Playwright screenshot + Sharp compression
+│   ├── extractZip.js   # Safe ZIP extraction
 │   ├── findBannerEntry.js
 │   ├── detectBannerSize.js
-│   ├── captureBackup.js
-│   ├── localServer.js
+│   ├── localServer.js  # Static file server (factory pattern)
+│   ├── riveTemplate.js # Rive HTML template generator
 │   ├── logger.js
 │   └── utils.js
 ├── package.json

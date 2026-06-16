@@ -86,7 +86,14 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
     }
     
     page.setDefaultTimeout(15000);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => {});
+    try {
+      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
+      if (response && !response.ok()) {
+        throw new Error(`HTTP ${response.status()} ${response.statusText()}`);
+      }
+    } catch (error) {
+      throw new Error(`Failed to load creative URL ${url}: ${error.message}`);
+    }
     await page.waitForLoadState('load', { timeout: 3000 }).catch(() => {});
     
     if (strategy === 'auto' || strategy === 'query') {
@@ -182,7 +189,7 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
     
     const screenshotBuffer = await captureScreenshot(page, dimensions);
     const outputPath = getUniqueOutputPath(outputDir, baseName, '.jpg');
-    await processAndSaveImage(screenshotBuffer, outputPath);
+    await processAndSaveImage(screenshotBuffer, outputPath, quality);
     
     logger.stepSuccess('Screenshot captured');
     logger.saved(outputPath);
@@ -266,7 +273,7 @@ async function captureScreenshot(page, dimensions) {
 }
 
 const MAX_FILE_SIZE = 80 * 1024;
-const QUALITY_TIERS = [95, 80, 65, 50, 35];
+const DEFAULT_QUALITY_TIERS = [95, 80, 65, 50, 35];
 
 function jpegOptions(quality) {
   return {
@@ -279,10 +286,20 @@ function jpegOptions(quality) {
   };
 }
 
-async function processAndSaveImage(buffer, outputPath) {
+export async function processAndSaveImage(buffer, outputPath, preferredQuality) {
   let result = null;
+  const seen = new Set();
+  const tiers = [];
 
-  for (const q of QUALITY_TIERS) {
+  if (preferredQuality && preferredQuality >= 10 && preferredQuality <= 100) {
+    tiers.push(preferredQuality);
+    seen.add(preferredQuality);
+  }
+  for (const q of DEFAULT_QUALITY_TIERS) {
+    if (!seen.has(q)) tiers.push(q);
+  }
+
+  for (const q of tiers) {
     result = await sharp(buffer).jpeg(jpegOptions(q)).toBuffer();
     if (result.length <= MAX_FILE_SIZE) break;
   }

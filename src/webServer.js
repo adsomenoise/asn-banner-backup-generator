@@ -9,7 +9,7 @@ import { extractZip } from './extractZip.js';
 import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
 import { captureBackup } from './captureBackup.js';
-import { createServer as startFileServer } from './localServer.js';
+import { createServer as startFileServer, closeServer as stopFileServer } from './localServer.js';
 import { logger } from './logger.js';
 import { sanitizeFileName } from './utils.js';
 import { parseRivDimensions, generateRiveHTML } from './riveTemplate.js';
@@ -20,6 +20,9 @@ const TEMP_DIR = path.join(ROOT, 'temp');
 const UPLOAD_DIR = path.join(TEMP_DIR, 'uploads');
 
 const MAX_CONCURRENT = 3;
+const MAX_UPLOAD_SIZE = 200 * 1024 * 1024;
+const MAX_UPLOAD_FILES = 50;
+const SESSION_TTL_MS = 30 * 60 * 1000;
 
 class Semaphore {
   constructor(max) {
@@ -54,6 +57,33 @@ async function rmdir(dir) {
   await fs.remove(dir).catch(() => {});
 }
 
+function isSafeFilename(name) {
+  return !name.includes('..') && !name.includes('/') && !name.includes('\\');
+}
+
+function createFileId(fileName, index) {
+  const parsed = path.parse(fileName);
+  const safeBase = sanitizeFileName(parsed.name) || 'file';
+  return `${String(index + 1).padStart(3, '0')}-${safeBase}`;
+}
+
+function getSessionWorkDir(session) {
+  return path.join(TEMP_DIR, 'work', session.id);
+}
+
+function getFileWorkDir(session, file) {
+  return path.join(getSessionWorkDir(session), file.id);
+}
+
+function getServedUrl(port, absolutePath) {
+  const relativePath = path.relative(TEMP_DIR, absolutePath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    throw new Error(`Cannot serve path outside temp directory: ${absolutePath}`);
+  }
+  const urlPath = relativePath.split(path.sep).map(encodeURIComponent).join('/');
+  return `http://localhost:${port}/${urlPath}`;
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (req, file, cb) => {
@@ -61,8 +91,18 @@ const upload = multer({
       await fs.ensureDir(dir);
       cb(null, dir);
     },
-    filename: (req, file, cb) => cb(null, file.originalname)
+    filename: (req, file, cb) => {
+      if (!isSafeFilename(file.originalname)) {
+        cb(new Error('Unsafe filename rejected'));
+        return;
+      }
+      cb(null, file.originalname);
+    }
   }),
+  limits: {
+    fileSize: MAX_UPLOAD_SIZE,
+    files: MAX_UPLOAD_FILES
+  },
   fileFilter: (req, file, cb) => {
     if (!/\.(zip|riv)$/i.test(file.originalname)) {
       return cb(new Error('Only .zip and .riv files allowed'));
@@ -71,10 +111,25 @@ const upload = multer({
   }
 });
 
+function pruneStaleSessions() {
+  const now = Date.now();
+  for (const [id, s] of sessions) {
+    if (s.status === 'processing') continue;
+    if (now - s.createdAt > SESSION_TTL_MS) {
+      rmdir(path.join(UPLOAD_DIR, id));
+      rmdir(s.resultDir);
+      rmdir(getSessionWorkDir(s));
+      sessions.delete(id);
+    }
+  }
+}
+
 export async function startWebServer(port = 3001) {
   const app = express();
 
   await fs.ensureDir(UPLOAD_DIR);
+
+  setInterval(pruneStaleSessions, 60_000).unref();
 
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -99,7 +154,9 @@ export async function startWebServer(port = 3001) {
 
     sessions.set(sessionId, {
       id: sessionId,
-      files: files.map(f => ({
+      createdAt: Date.now(),
+      files: files.map((f, index) => ({
+        id: createFileId(f.originalname, index),
         name: f.originalname,
         path: f.path,
         type: /\.riv$/i.test(f.originalname) ? 'riv' : 'zip'
@@ -132,112 +189,7 @@ export async function startWebServer(port = 3001) {
 
     res.json({ sessionId: session.id, status: 'processing' });
 
-    (async () => {
-      const fileServer = await startFileServer(3002, TEMP_DIR).catch(() => null);
-      const port = fileServer ? fileServer.address().port : 3002;
-
-      const tasks = session.files.map(async (file) => {
-        await globalCap.acquire();
-        let sanitized = '';
-        let keepDir = false;
-
-        try {
-          if (file.type === 'riv') {
-            const base = path.basename(file.name, '.riv');
-            sanitized = sanitizeFileName(base);
-            const dims = parseRivDimensions(file.name);
-
-            if (!dims) {
-              throw new Error(`Could not parse dimensions from filename: ${file.name}`);
-            }
-
-            const creativeDir = path.join(TEMP_DIR, sanitized);
-            await fs.ensureDir(creativeDir);
-
-            const jsFile = path.join(creativeDir, `${sanitized}.js`);
-            await fs.copyFile(file.path, jsFile);
-
-            const htmlContent = generateRiveHTML(`${sanitized}.js`, dims.width, dims.height);
-            const htmlFile = path.join(creativeDir, `${sanitized}.html`);
-            await fs.writeFile(htmlFile, htmlContent);
-
-            const url = `http://localhost:${port}/${sanitized}/${sanitized}.html`;
-
-            await captureBackup(url, dims, session.resultDir, sanitized, {
-              waitTimeout: 15000,
-              quality: 90,
-              strategy: 'auto'
-            });
-
-            keepDir = true;
-            return { name: sanitized, type: 'riv', creativeDir };
-          } else {
-            const zipName = path.basename(file.name, '.zip');
-            sanitized = sanitizeFileName(zipName);
-            const extracted = await extractZip(file.path, TEMP_DIR);
-            const entry = await findBannerEntry(extracted);
-            const dimensions = await detectBannerSize(entry, file.path);
-
-            const bannerFolder = path.basename(extracted);
-            const relativeEntry = path.relative(extracted, entry);
-            const url = `http://localhost:${port}/${bannerFolder}/${relativeEntry}`;
-
-            await captureBackup(url, dimensions, session.resultDir, sanitized, {
-              waitTimeout: 15000,
-              quality: 90,
-              strategy: 'auto'
-            });
-
-            return { name: sanitized, type: 'zip', creativeDir: null };
-          }
-        } catch (err) {
-          session.errors.push({ file: file.name, error: err.message });
-          return null;
-        } finally {
-          globalCap.release();
-          await fs.remove(file.path).catch(() => {});
-          if (sanitized && !keepDir) {
-            await rmdir(path.join(TEMP_DIR, sanitized));
-          }
-          session.current++;
-        }
-      });
-
-      const results = (await Promise.all(tasks)).filter(Boolean);
-      session.results.push(...results);
-
-      if (fileServer) {
-        await new Promise(r => fileServer.close(r));
-      }
-
-      const outputZip = path.join(TEMP_DIR, 'results', `${session.id}.zip`);
-      const zip = new AdmZip();
-
-      for (const result of session.results) {
-        if (result.type === 'riv' && result.creativeDir) {
-          const nestedZipPath = path.join(session.resultDir, `${result.name}.zip`);
-          const nestedZip = new AdmZip();
-          const creativeFiles = await fs.readdir(result.creativeDir).catch(() => []);
-          for (const f of creativeFiles) {
-            if (f.endsWith('.html') || f.endsWith('.js')) {
-              nestedZip.addLocalFile(path.join(result.creativeDir, f));
-            }
-          }
-          nestedZip.writeZip(nestedZipPath);
-          zip.addLocalFile(nestedZipPath, '', `${result.name}.zip`);
-        }
-
-        const jpgPath = path.join(session.resultDir, `${result.name}.jpg`);
-        if (await fs.pathExists(jpgPath)) {
-          zip.addLocalFile(jpgPath, '', `${result.name}.jpg`);
-        }
-      }
-
-      zip.writeZip(outputZip);
-
-      session.outputZip = outputZip;
-      session.status = 'complete';
-    })();
+    processSession(session);
   });
 
   app.get('/api/status/:sessionId', (req, res) => {
@@ -266,20 +218,21 @@ export async function startWebServer(port = 3001) {
     }
 
     res.download(zipPath, `backup-images-${session.id}.zip`, async () => {
-      await fs.remove(zipPath).catch(() => {});
-      await rmdir(session.resultDir);
-      for (const result of session.results) {
-        if (result.type === 'riv' && result.creativeDir) {
-          await rmdir(result.creativeDir);
-        }
-      }
-      await rmdir(path.join(UPLOAD_DIR, session.id));
-      sessions.delete(session.id);
+      await cleanupSession(session);
     });
   });
 
   app.use((err, req, res, next) => {
-    if (err instanceof multer.MulterError || err.message) {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File too large (max 200 MB)' });
+      }
+      if (err.code === 'LIMIT_FILE_COUNT') {
+        return res.status(400).json({ error: 'Too many files (max 50)' });
+      }
+      return res.status(400).json({ error: err.message });
+    }
+    if (err.message) {
       return res.status(400).json({ error: err.message });
     }
     res.status(500).json({ error: 'Internal server error' });
@@ -292,6 +245,137 @@ export async function startWebServer(port = 3001) {
     });
     server.on('error', reject);
   });
+}
+
+async function processSession(session) {
+  let fileServer = null;
+
+  try {
+    fileServer = await startFileServer(3002, TEMP_DIR);
+  } catch (err) {
+    session.status = 'error';
+    session.errors.push({ file: 'server', error: `Failed to start local file server: ${err.message}` });
+    return;
+  }
+
+  const port = fileServer.address().port;
+
+  try {
+    const tasks = session.files.map(async (file) => {
+      await globalCap.acquire();
+      const fileWorkDir = getFileWorkDir(session, file);
+      let sanitized = '';
+      let keepDir = false;
+
+      try {
+        if (file.type === 'riv') {
+          const base = path.basename(file.name, '.riv');
+          sanitized = sanitizeFileName(base);
+          const dims = parseRivDimensions(file.name);
+
+          if (!dims) {
+            throw new Error(`Could not parse dimensions from filename: ${file.name}`);
+          }
+
+          const creativeDir = path.join(fileWorkDir, 'rive');
+          await fs.ensureDir(creativeDir);
+
+          const jsFile = path.join(creativeDir, `${sanitized}.js`);
+          await fs.copyFile(file.path, jsFile);
+
+          const htmlContent = generateRiveHTML(`${sanitized}.js`, dims.width, dims.height);
+          const htmlFile = path.join(creativeDir, `${sanitized}.html`);
+          await fs.writeFile(htmlFile, htmlContent);
+
+          const url = getServedUrl(port, htmlFile);
+
+          await captureBackup(url, dims, session.resultDir, sanitized, {
+            waitTimeout: 15000,
+            strategy: 'auto'
+          });
+
+          keepDir = true;
+          return { name: sanitized, type: 'riv', creativeDir };
+        } else {
+          const zipName = path.basename(file.name, '.zip');
+          sanitized = sanitizeFileName(zipName);
+          const extracted = await extractZip(file.path, fileWorkDir, { extractName: 'extracted' });
+          const entry = await findBannerEntry(extracted);
+          const dimensions = await detectBannerSize(entry, file.path);
+
+          const url = getServedUrl(port, entry);
+
+          await captureBackup(url, dimensions, session.resultDir, sanitized, {
+            waitTimeout: 15000,
+            strategy: 'auto'
+          });
+
+          keepDir = true;
+          return { name: sanitized, type: 'zip', creativeDir: null };
+        }
+      } catch (err) {
+        session.errors.push({ file: file.name, error: err.message });
+        return null;
+      } finally {
+        globalCap.release();
+        await fs.remove(file.path).catch(() => {});
+        if (!keepDir) {
+          await rmdir(fileWorkDir);
+        }
+        session.current++;
+      }
+    });
+
+    const results = (await Promise.all(tasks)).filter(Boolean);
+    session.results.push(...results);
+
+    const outputZip = path.join(TEMP_DIR, 'results', `${session.id}.zip`);
+    const zip = new AdmZip();
+
+    for (const result of session.results) {
+      if (result.type === 'riv' && result.creativeDir) {
+        const nestedZipPath = path.join(session.resultDir, `${result.name}.zip`);
+        const nestedZip = new AdmZip();
+        const creativeFiles = await fs.readdir(result.creativeDir).catch(() => []);
+        for (const f of creativeFiles) {
+          if (f.endsWith('.html') || f.endsWith('.js')) {
+            nestedZip.addLocalFile(path.join(result.creativeDir, f));
+          }
+        }
+        nestedZip.writeZip(nestedZipPath);
+        zip.addLocalFile(nestedZipPath, '', `${result.name}.zip`);
+      }
+
+      const jpgPath = path.join(session.resultDir, `${result.name}.jpg`);
+      if (await fs.pathExists(jpgPath)) {
+        zip.addLocalFile(jpgPath, '', `${result.name}.jpg`);
+      }
+    }
+
+    zip.writeZip(outputZip);
+
+    session.outputZip = outputZip;
+    session.status = 'complete';
+  } catch (err) {
+    logger.error(`Failed to build output ZIP for session ${session.id}: ${err.message}`);
+    session.status = 'error';
+    session.errors.push({ file: 'output', error: `Failed to build ZIP: ${err.message}` });
+  } finally {
+    await stopFileServer(fileServer);
+  }
+}
+
+async function cleanupSession(session) {
+  await rmdir(session.outputZip).catch(() => {});
+  await rmdir(session.resultDir).catch(() => {});
+  for (const result of session.results) {
+    if (result.type === 'riv' && result.creativeDir) {
+      await rmdir(result.creativeDir).catch(() => {});
+    }
+  }
+  await rmdir(getSessionWorkDir(session)).catch(() => {});
+  await rmdir(path.join(UPLOAD_DIR, session.id)).catch(() => {});
+  sessions.delete(session.id);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
