@@ -1,10 +1,10 @@
-import { chromium } from 'playwright';
 import sharp from 'sharp';
 import fs from 'fs-extra';
 import path from 'path';
 import { logger } from './logger.js';
 import { metrics } from './metrics.js';
 import { delay, getUniqueOutputPath } from './utils.js';
+import { getBrowserPool } from './browserPool.js';
 
 const STRATEGIES = {
   QUERY_PARAM: 'Query parameter (?backup=1)',
@@ -26,10 +26,9 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
   const browserErrors = [];
   let usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
-  });
+  const pool = getBrowserPool();
+  const lease = await pool.acquire();
+  const { browser } = lease;
 
   const context = await browser.newContext({
     viewport: { width: dimensions.width, height: dimensions.height },
@@ -108,6 +107,7 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
   try {
     let backupReady = false;
     let url = baseUrl;
+    let creativeTimelineStart = Date.now();
 
     if (strategy === 'auto' || strategy === 'query') {
       url = baseUrl.includes('?') ? `${baseUrl}&backup=1` : `${baseUrl}?backup=1`;
@@ -115,6 +115,7 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
 
     page.setDefaultTimeout(15000);
     try {
+      creativeTimelineStart = Date.now();
       const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
       if (response && !response.ok()) {
         throw new Error(`HTTP ${response.status()} ${response.statusText()}`);
@@ -173,6 +174,13 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
         }));
       }
 
+      const elapsed = Date.now() - creativeTimelineStart;
+      const remaining = waitTimeout - elapsed;
+      if (remaining > 0) {
+        log.step(`Waiting ${remaining}ms for fallback end frame...`);
+        await delay(remaining);
+      }
+
       const maxFrames = Math.ceil(waitTimeout / 6);
       const batchSize = 400;
       let totalDrained = 0;
@@ -184,7 +192,10 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
       }
 
       while (totalDrained < maxFrames && !stable) {
-        const drained = await page.evaluate((n) => window.__drainRAF(n), batchSize);
+        const drained = await page.evaluate(
+          ({ frames, virtualDuration }) => window.__drainRAF(frames, virtualDuration),
+          { frames: batchSize, virtualDuration: waitTimeout }
+        );
         totalDrained += drained;
 
         const hash = await page.evaluate(() => window.__hashViewport());
@@ -255,14 +266,15 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
 
   } finally {
     await context.close();
-    await browser.close();
+    pool.release(lease);
   }
 }
 
 async function checkBackupReady(page) {
   try {
     return await page.waitForFunction(
-      () => window.__BACKUP_READY__ === true,
+      () => window.__backupReady === true || window.__BACKUP_READY__ === true,
+      null,
       { timeout: 1000 }
     ).then(() => true);
   } catch {
@@ -275,7 +287,15 @@ async function tryGenerateBackupFrame(page) {
     const hasFunction = await page.evaluate(() => typeof window.generateBackupFrame === 'function');
     if (!hasFunction) return false;
 
-    await page.evaluate(() => window.generateBackupFrame());
+    await page.evaluate(async () => {
+      const result = window.generateBackupFrame();
+      if (result && typeof result.then === 'function') {
+        await result;
+      }
+      if (result === true) {
+        window.__backupReady = true;
+      }
+    });
 
     return await checkBackupReady(page);
   } catch {
@@ -296,6 +316,7 @@ async function tryRiveInstanceScrub(page) {
         if (instance.pause) instance.pause();
         if (instance.scrub) instance.scrub(Number.MAX_SAFE_INTEGER);
         if (instance.play) instance.play();
+        window.__backupReady = true;
         window.__BACKUP_READY__ = true;
       } catch (e) {
         console.warn('Rive scrub failed:', e);

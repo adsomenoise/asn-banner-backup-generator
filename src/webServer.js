@@ -18,6 +18,9 @@ import { createAuthMiddleware } from './auth/middleware.js';
 import { Job, FileInfo } from './jobs/Job.js';
 import { InMemoryJobStore } from './jobs/JobStore.js';
 import { LocalStorage } from './storage/LocalStorage.js';
+import { getCaptureConcurrency } from './config.js';
+
+export { parseCaptureConcurrency } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -25,7 +28,7 @@ const TEMP_DIR = path.join(ROOT, 'temp');
 
 const storage = new LocalStorage(TEMP_DIR);
 
-const MAX_CONCURRENT = 3;
+const MAX_CONCURRENT = getCaptureConcurrency();
 const MAX_UPLOAD_SIZE = 200 * 1024 * 1024;
 const MAX_UPLOAD_FILES = 50;
 const SESSION_TTL_MS = 30 * 60 * 1000;

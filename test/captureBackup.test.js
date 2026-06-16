@@ -1,11 +1,17 @@
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert';
 import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs-extra';
+import http from 'node:http';
 import { captureBackup, processAndSaveImage } from '../src/captureBackup.js';
+import { closeBrowserPool } from '../src/browserPool.js';
 
 const MAX_FILE_SIZE = 80 * 1024;
+
+after(async () => {
+  await closeBrowserPool();
+});
 
 function createTestImage(width, height) {
   return sharp({
@@ -70,5 +76,107 @@ describe('captureBackup — navigation errors', () => {
 
     assert.ok(!(await fs.pathExists(path.join(outDir, 'missing.jpg'))));
     await fs.remove(outDir);
+  });
+});
+
+describe('captureBackup — creative backup contract', () => {
+  it('calls window.generateBackupFrame and uses the fast backup strategy', async () => {
+    const outDir = path.resolve('test-temp-capute', 'contract');
+    await fs.remove(outDir);
+    await fs.ensureDir(outDir);
+
+    const server = http.createServer((req, res) => {
+      if (req.url === '/called') {
+        res.writeHead(204).end();
+        return;
+      }
+
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<!doctype html>
+        <html>
+          <body style="margin:0">
+            <canvas id="creative" width="300" height="250"></canvas>
+            <script>
+              window.generateBackupFrame = function () {
+                fetch('/called').catch(function () {});
+                var c = document.getElementById('creative');
+                var ctx = c.getContext('2d');
+                ctx.fillStyle = '#0f766e';
+                ctx.fillRect(0, 0, c.width, c.height);
+                window.__backupReady = true;
+              };
+            </script>
+          </body>
+        </html>`);
+    });
+
+    let called = 0;
+    server.on('request', req => {
+      if (req.url === '/called') called++;
+    });
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address();
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 300, height: 250 }, outDir, 'contract', {
+        waitTimeout: 5000,
+        strategy: 'auto'
+      });
+
+      assert.strictEqual(result.strategy, 'window.generateBackupFrame()');
+      assert.ok(called >= 1);
+      assert.ok(await fs.pathExists(path.join(outDir, 'contract.jpg')));
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+      await fs.remove(outDir);
+    }
+  });
+});
+
+describe('captureBackup — fallback timing', () => {
+  it('waits for the configured creative duration before screenshotting without a backup hook', async () => {
+    const outDir = path.resolve('test-temp-capute', 'fallback-timing');
+    await fs.remove(outDir);
+    await fs.ensureDir(outDir);
+
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<!doctype html>
+        <html>
+          <body style="margin:0">
+            <canvas id="creative" width="20" height="20"></canvas>
+            <script>
+              var c = document.getElementById('creative');
+              var ctx = c.getContext('2d');
+              ctx.fillStyle = '#ff0000';
+              ctx.fillRect(0, 0, c.width, c.height);
+              setTimeout(function () {
+                ctx.fillStyle = '#00ff00';
+                ctx.fillRect(0, 0, c.width, c.height);
+              }, 1500);
+            </script>
+          </body>
+        </html>`);
+    });
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address();
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 20, height: 20 }, outDir, 'fallback', {
+        waitTimeout: 1700,
+        strategy: 'auto',
+        quality: 95
+      });
+
+      assert.strictEqual(result.strategy, 'Fallback timeout');
+      const { data } = await sharp(path.join(outDir, 'fallback.jpg'))
+        .resize(1, 1)
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      assert.ok(data[1] > data[0], `expected green end frame, got rgb(${data[0]}, ${data[1]}, ${data[2]})`);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+      await fs.remove(outDir);
+    }
   });
 });

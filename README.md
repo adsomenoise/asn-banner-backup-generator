@@ -36,7 +36,7 @@ node src/index.js \
 |--------|---------|-------------|
 | `--input, -i` | `./input` | Input folder with ZIP files |
 | `--output, -o` | `./output` | Output folder for JPGs |
-| `--wait, -w` | `15000` | Fallback timeout in ms |
+| `--wait, -w` | `15000` | Creative duration in ms before fallback screenshot capture |
 | `--quality, -q` | `95` | Preferred JPEG quality (10–100); falls back through lower tiers to stay under 80 KB |
 | `--port, -p` | `3000` | Local server port |
 | `--strategy, -s` | `auto` | Backup strategy: `auto`, `query`, `generate`, `scrub` |
@@ -48,6 +48,14 @@ npm run serve
 ```
 
 Open `http://localhost:3001` in your browser.
+
+To tune parallel capture throughput, set `CAPTURE_CONCURRENCY` before starting the server:
+
+```bash
+CAPTURE_CONCURRENCY=5 npm run serve
+```
+
+The default is `3`. Invalid values fall back to `3`; values above `8` are capped at `8`.
 
 ### Workflow
 
@@ -336,9 +344,9 @@ The legacy routes invoke the same handler functions and return the same response
 3. Locates the only `.html` file automatically (any filename)
 4. Detects banner dimensions (meta tag > canvas > filename > default 300x250)
 5. Serves the banner via a local HTTP server (no `file://` URLs)
-6. Opens the banner in headless Chromium via Playwright
+6. Opens the banner in headless Chromium via a reusable Playwright browser pool
 7. Applies backup strategies to reach the final visual state
-8. Fast-forwards animations by draining queued `requestAnimationFrame` callbacks
+8. If no explicit backup hook is available, waits for the configured creative duration and drains queued `requestAnimationFrame` callbacks
 9. Captures a PNG screenshot and compresses to JPEG (multi-tier quality, targets ≤80 KB)
 10. Saves to `output/` with optional dedup suffix
 
@@ -346,11 +354,25 @@ The legacy routes invoke the same handler functions and return the same response
 
 ### Strategy 1 — Query Parameter (Recommended)
 
-Loads the HTML with `?backup=1` appended. Rive creatives should check for this parameter and self-render to their final state.
+Loads the HTML with `?backup=1` appended. Creatives should check for this parameter, render the final static backup frame immediately, then set:
+
+```js
+window.__backupReady = true;
+```
 
 ### Strategy 2 — `window.generateBackupFrame()`
 
-If the page exposes this async function, the generator calls it and waits for `window.__BACKUP_READY__ = true`.
+If the page exposes this function, the generator calls it and waits for `window.__backupReady = true`.
+
+```js
+window.generateBackupFrame = async function () {
+  await stopAnimations();
+  renderBackupFrame();
+  window.__backupReady = true;
+};
+```
+
+The function may be synchronous or async. If it returns `true`, the generator also treats the backup frame as ready. The legacy marker `window.__BACKUP_READY__ = true` remains supported for older creatives.
 
 ### Strategy 3 — Rive Instance Scrub
 
@@ -358,7 +380,9 @@ If `window.riveInstance` is exposed with a `scrub` method, attempts to scrub to 
 
 ### Strategy 4 — Fallback Timeout
 
-Drains animation frames, detects canvas stability, then captures whatever is on screen.
+When no explicit backup hook is available, waits until the configured creative duration has elapsed from navigation start, drains queued animation frames, detects canvas stability, then captures whatever is on screen. The default duration is `15000` ms.
+
+This path is slower than the explicit backup contract and can add about 15 seconds per creative. See [Creative Backup Image Contract](docs/creative-backup-contract.md) for implementation examples.
 
 ## Authentication
 
@@ -462,7 +486,7 @@ await startWebServer(3001, {
 - **CORS** is configurable via `startWebServer(port, { corsOrigin })`. Defaults to `*` for local development. In production, set to the specific origin of the parent platform.
 - **Rate limiting** is applied to mutation endpoints (`POST /api/v1/jobs` and `POST /api/v1/jobs/:jobId/process`). Default: 30 requests per 60-second window per IP. Configurable via `rateLimitMax` option.
 - **Local server scoping**: each job's Playwright-accessible file server is scoped to that job's work directory only — files from other jobs are not accessible.
-- **Playwright browser context** is launched with `--disable-web-security` (required to load cross-origin Rive resources via CDN). This is acceptable because the local server only serves job-scoped directories and binds to `localhost`.
+- **Playwright Chromium** is launched with `--disable-web-security` (required to load cross-origin Rive resources via CDN). This is acceptable because the local server only serves job-scoped directories and binds to `localhost`. Chromium processes are pooled, but each capture gets a fresh browser context and page.
 
 ### HTML Template
 
@@ -470,8 +494,9 @@ await startWebServer(3001, {
 
 ### Concurrency
 
-- A global semaphore limits concurrent Playwright browser instances to 3 (`MAX_CONCURRENT`).
+- A global semaphore limits concurrent captures. Configure it with `CAPTURE_CONCURRENCY`; default is `3`, maximum is `8`.
 - Each session's files are processed in parallel within that limit.
+- Playwright Chromium processes are reused through a browser pool. Each capture still gets a fresh browser context and page for isolation.
 - The local file server in CLI mode uses a factory pattern (no shared mutable state).
 
 ### Quality Settings
@@ -482,7 +507,7 @@ The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the re
 
 - Background processing in the web server is wrapped in a try/catch — if any part of the job fails, the session transitions to `error` status (never stuck in `processing`).
 - Temporary files (uploaded ZIPs, extracted directories, result JPGs) are cleaned up on success and failure.
-- Playwright browser contexts are closed reliably via `try/finally` in `captureBackup.js`.
+- Playwright browser contexts are closed reliably via `try/finally` in `captureBackup.js`; pooled Chromium processes are reused across captures.
 - **Per-file error tracking**: each file has an independent `state` (`uploaded` → `queued` → `processing` → `complete`/`failed`). Failed files include a user-friendly error message explaining the issue (e.g. missing `.html` in ZIP, missing dimensions in `.riv` filename, file too large).
 - **Friendly error mapping**: common cryptic errors are mapped to actionable messages. Unknown errors pass through as-is.
 - **`errors.json`**: when any file in a session fails, the download ZIP includes an `errors.json` with `{file, error, friendly}` entries for every failure.
@@ -661,7 +686,7 @@ npm test            # Run all tests
 npm run test:watch  # Re-run on file changes
 ```
 
-Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`, `test/security.test.js`, `test/observability.test.js`.
+Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/browserPool.test.js`, `test/concurrencyConfig.test.js`, `test/frontendUi.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`, `test/security.test.js`, `test/observability.test.js`.
 
 Tests cover:
 - ZIP path-traversal safety (`isPathSafe`)
@@ -671,7 +696,9 @@ Tests cover:
 - Rive HTML template generation and XSS escaping
 - JPEG quality tier fallback (size cap, preferred-quality priority)
 - Output file deduplication
-- Playwright navigation error resilience
+- Playwright navigation error resilience, backup contract fast path, and fallback end-frame timing
+- Browser pool reuse and capture concurrency configuration
+- Frontend polling behavior for digit-prefixed file IDs
 - API v1 contract: 22 HTTP tests for health, upload, process, status, files, download, error shapes, legacy aliases
 - Auth integration: 33 tests for adapter unit, production 401, own-job access, cross-user 404, tenant isolation, health bypass, legacy auth
 - Job model + store: 48 tests for FileInfo, Job transitions/ownership/toJSON, InMemoryJobStore CRUD/lifecycle
@@ -686,6 +713,8 @@ rive-backup-generator/
 ├── input/              # Place ZIP files here (CLI)
 ├── output/             # Generated JPGs (CLI)
 ├── temp/               # Extracted ZIPs, uploads, results (auto-managed, gitignored)
+├── docs/
+│   └── creative-backup-contract.md # Fast backup-frame contract for creatives
 ├── test/               # Automated tests
 ├── src/
 │   ├── auth/
@@ -699,6 +728,8 @@ rive-backup-generator/
 │   ├── index.js        # CLI entry point
 │   ├── webServer.js    # Express web server
 │   ├── captureBackup.js# Playwright screenshot + Sharp compression
+│   ├── browserPool.js  # Reusable Playwright Chromium pool
+│   ├── config.js       # Runtime config parsing (capture concurrency)
 │   ├── extractZip.js   # Safe ZIP extraction
 │   ├── findBannerEntry.js
 │   ├── detectBannerSize.js
@@ -709,6 +740,7 @@ rive-backup-generator/
 │   ├── utils.js
 │   └── public/         # Web UI frontend
 │       ├── index.html
+│       ├── style.css
 │       └── animation.gif
 ├── package.json
 └── README.md
