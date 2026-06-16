@@ -354,15 +354,22 @@ function handleFiles(files) {
   if (trulyNew.length === 0) return;
 
   const form = new FormData();
-  trulyNew.forEach(f => form.append('zips', f));
+  trulyNew.forEach(f => form.append('files', f));
 
   processBtn.disabled = true;
 
-  fetch('/api/upload', { method: 'POST', body: form })
+  fetch('/api/v1/jobs', { method: 'POST', body: form })
     .then(r => r.json())
     .then(data => {
-      sessionId = data.sessionId;
-      sessionFiles = [...sessionFiles, ...data.files];
+      sessionId = data.jobId;
+      const mapped = data.files.map(f => ({
+        id: f.fileId,
+        name: f.fileName,
+        type: f.fileType,
+        state: f.state,
+        error: f.error || null
+      }));
+      sessionFiles = [...sessionFiles, ...mapped];
       renderFileList();
       processBtn.disabled = false;
     })
@@ -472,7 +479,7 @@ processBtn.addEventListener('click', async () => {
   sessionFiles.forEach(f => { f.state = 'queued'; });
   renderFileList();
 
-  const res = await fetch(`/api/process/${sessionId}`, { method: 'POST' });
+  const res = await fetch(`/api/v1/jobs/${sessionId}/process`, { method: 'POST' });
   if (!res.ok) {
     overlay.classList.remove('visible');
     stopWaitingText();
@@ -487,17 +494,17 @@ processBtn.addEventListener('click', async () => {
 async function pollStatus() {
   while (polling) {
     try {
-      const res = await fetch(`/api/status/${sessionId}`);
+      const res = await fetch(`/api/v1/jobs/${sessionId}`);
       const data = await res.json();
 
       if (data.files) {
         data.files.forEach(sf => {
-          updateFileState(sf.id, sf.state, sf.error);
+          updateFileState(sf.fileId, sf.state, sf.error);
         });
       }
 
-      const done = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : data.current;
-      const total = data.total;
+      const done = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : (data.progress ? data.progress.completed + data.progress.failed : 0);
+      const total = data.progress ? data.progress.total : data.total;
       const pct = total > 0 ? (done / total * 100) : 0;
       progressFill.style.width = Math.min(pct, 100) + '%';
 
@@ -512,7 +519,7 @@ async function pollStatus() {
         stopWaitingText();
         progressFill.style.width = '100%';
 
-        const successCount = data.results;
+        const successCount = data.progress ? data.progress.results : data.results;
         const failCount = data.files ? data.files.filter(f => f.state === 'failed').length : 0;
 
         if (failCount > 0 && successCount > 0) {
@@ -555,7 +562,7 @@ async function pollStatus() {
 
 downloadBtn.addEventListener('click', () => {
   if (!sessionId) return;
-  window.location.href = `/api/download/${sessionId}`;
+  window.location.href = `/api/v1/jobs/${sessionId}/download`;
   downloadBtn.disabled = true;
   downloadBtn.textContent = 'Downloading...';
   setTimeout(() => {

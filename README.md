@@ -61,6 +61,272 @@ Open `http://localhost:3001` in your browser.
    - **Start over** resets everything.
 5. Click **Download ZIP** to get a single archive containing: JPGs for successful files, nested per-creative ZIPs (`.html` + `.js`) for `.riv` files, and `errors.json` if any file failed.
 
+## API Reference
+
+All API endpoints are versioned under `/api/v1/`. Legacy `/api/` routes remain available for backwards compatibility (see [Legacy Aliases](#legacy-aliases)).
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/health` | Health/readiness check |
+| `POST` | `/api/v1/jobs` | Create a job and upload files |
+| `POST` | `/api/v1/jobs/{jobId}/process` | Start processing a job |
+| `GET` | `/api/v1/jobs/{jobId}` | Get job status with per-file details |
+| `GET` | `/api/v1/jobs/{jobId}/files` | Get per-file details only |
+| `GET` | `/api/v1/jobs/{jobId}/download` | Download result ZIP |
+
+---
+
+### `GET /api/v1/health`
+
+Returns server health information.
+
+**Response `200 OK`**
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-06-16T13:00:00.000Z",
+  "version": "1.0.0",
+  "uptime": 1234.56
+}
+```
+
+---
+
+### `POST /api/v1/jobs`
+
+Upload files and create a processing job. Accepts `multipart/form-data`.
+
+**Form fields**
+| Field | Type | Description |
+|-------|------|-------------|
+| `files` | `File[]` | One or more `.zip` or `.riv` files (max 50, max 200 MB each) |
+
+**Response `201 Created`**
+```json
+{
+  "jobId": "a1b2c3d4",
+  "status": "uploaded",
+  "createdAt": "2026-06-16T13:00:00.000Z",
+  "files": [
+    {
+      "fileId": "001-banner_300x250",
+      "fileName": "banner_300x250.zip",
+      "fileType": "zip",
+      "state": "uploaded",
+      "error": null
+    }
+  ],
+  "progress": {
+    "total": 1,
+    "completed": 0,
+    "failed": 0,
+    "results": 0
+  }
+}
+```
+
+**Error responses**
+
+- `400` — `NO_FILES` (no files attached)
+- `400` — `INVALID_FILE_TYPE` (file doesn't end in `.zip` or `.riv`)
+- `400` — `FILE_TOO_LARGE` (single file >200 MB)
+- `400` — `TOO_MANY_FILES` (>50 files)
+- `400` — `UNSAFE_FILENAME` (name contains `..`, `/`, or `\`)
+
+---
+
+### `POST /api/v1/jobs/{jobId}/process`
+
+Start processing all files in a job. Returns immediately; progress is tracked via `GET /api/v1/jobs/{jobId}`.
+
+**Response `200 OK`**
+```json
+{
+  "jobId": "a1b2c3d4",
+  "status": "processing",
+  "createdAt": "2026-06-16T13:00:00.000Z",
+  "files": [
+    {
+      "fileId": "001-banner_300x250",
+      "fileName": "banner_300x250.zip",
+      "fileType": "zip",
+      "state": "queued",
+      "error": null
+    }
+  ],
+  "progress": {
+    "total": 1,
+    "completed": 0,
+    "failed": 0,
+    "results": 0
+  }
+}
+```
+
+**Error responses**
+- `404` — `NOT_FOUND` (unknown `jobId`)
+- `409` — `ALREADY_PROCESSING` (job is already being processed)
+
+---
+
+### `GET /api/v1/jobs/{jobId}`
+
+Get the full job status, including per-file states and progress counters.
+
+**Response `200 OK`** (status: `uploaded`)
+```json
+{
+  "jobId": "a1b2c3d4",
+  "status": "uploaded",
+  "createdAt": "2026-06-16T13:00:00.000Z",
+  "files": [
+    {
+      "fileId": "001-banner_300x250",
+      "fileName": "banner_300x250.zip",
+      "fileType": "zip",
+      "state": "uploaded",
+      "error": null
+    }
+  ],
+  "progress": {
+    "total": 1,
+    "completed": 0,
+    "failed": 0,
+    "results": 0
+  }
+}
+```
+
+**Response `200 OK`** (status: `complete`)
+```json
+{
+  "jobId": "a1b2c3d4",
+  "status": "complete",
+  "createdAt": "2026-06-16T13:00:00.000Z",
+  "files": [
+    {
+      "fileId": "001-banner_300x250",
+      "fileName": "banner_300x250.zip",
+      "fileType": "zip",
+      "state": "complete",
+      "error": null
+    },
+    {
+      "fileId": "002-layout",
+      "fileName": "layout.zip",
+      "fileType": "zip",
+      "state": "failed",
+      "error": "The ZIP must contain at least one .html file. None was found."
+    }
+  ],
+  "progress": {
+    "total": 2,
+    "completed": 1,
+    "failed": 1,
+    "results": 1
+  },
+  "download": "/api/v1/jobs/a1b2c3d4/download"
+}
+```
+
+The `download` field is present only when `status` is `complete` and at least one file succeeded.
+
+**Error responses**
+- `404` — `NOT_FOUND` (unknown `jobId`)
+
+---
+
+### `GET /api/v1/jobs/{jobId}/files`
+
+Get only the per-file detail array (lighter than the full job response).
+
+**Response `200 OK`**
+```json
+{
+  "jobId": "a1b2c3d4",
+  "files": [
+    {
+      "fileId": "001-banner_300x250",
+      "fileName": "banner_300x250.zip",
+      "fileType": "zip",
+      "state": "complete",
+      "error": null
+    }
+  ]
+}
+```
+
+**Error responses**
+- `404` — `NOT_FOUND` (unknown `jobId`)
+
+---
+
+### `GET /api/v1/jobs/{jobId}/download`
+
+Download the result ZIP archive. Each successful file's JPG is included. Failed files are excluded. If any file failed, an `errors.json` manifest is included.
+
+**Response `200 OK`** — Binary ZIP download (`Content-Type: application/zip`)
+
+**Error responses**
+- `404` — `NOT_FOUND` (unknown `jobId` or result file missing)
+- `400` — `NOT_COMPLETE` (job is still processing or not yet started)
+
+---
+
+### Standard Error Shape
+
+Every error response follows this shape:
+
+```json
+{
+  "error": "Human-readable description of what went wrong",
+  "code": "MACHINE_READABLE_CODE"
+}
+```
+
+| Code | Meaning |
+|------|---------|
+| `NOT_FOUND` | The requested job ID does not exist |
+| `NOT_COMPLETE` | The job is not yet in `complete` status |
+| `ALREADY_PROCESSING` | Cannot start processing again while already running |
+| `NO_FILES` | No files were attached to the upload request |
+| `INVALID_FILE_TYPE` | A file does not have `.zip` or `.riv` extension |
+| `FILE_TOO_LARGE` | A single file exceeds the 200 MB limit |
+| `TOO_MANY_FILES` | More than 50 files were uploaded in one request |
+| `UNSAFE_FILENAME` | Filename contains `..`, `/`, or `\` |
+| `UPLOAD_ERROR` | A generic upload error occurred |
+| `BAD_REQUEST` | A generic client error |
+| `INTERNAL_ERROR` | An unexpected server error occurred |
+
+---
+
+### File Lifecycle
+
+Each file in a job transitions through these states:
+
+| State | Description |
+|-------|-------------|
+| `uploaded` | File has been received and stored |
+| `queued` | Job is processing; this file is waiting for a worker slot |
+| `processing` | Actively being processed (screenshot taken, JPG compressed) |
+| `complete` | Backup image generated successfully |
+| `failed` | Processing failed; `error` field contains the reason |
+
+---
+
+### Legacy Aliases
+
+| Legacy path | v1 equivalent | Notes |
+|-------------|---------------|-------|
+| `POST /api/upload` | `POST /api/v1/jobs` | Uses form field `zips` instead of `files` |
+| `POST /api/process/:sessionId` | `POST /api/v1/jobs/:jobId/process` | — |
+| `GET /api/status/:sessionId` | `GET /api/v1/jobs/:jobId` | Returns v1-shaped response (not the old shape) |
+| `GET /api/download/:sessionId` | `GET /api/v1/jobs/:jobId/download` | — |
+
+The legacy routes invoke the same handler functions and return the same response shapes as their v1 counterparts.
+
 ## How It Works
 
 1. Scans `input/` for `.zip` files (CLI) or accepts uploads (web)

@@ -24,6 +24,8 @@ const MAX_UPLOAD_SIZE = 200 * 1024 * 1024;
 const MAX_UPLOAD_FILES = 50;
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
+const APP_VERSION = '1.0.0';
+
 class Semaphore {
   constructor(max) {
     this.max = max;
@@ -114,6 +116,51 @@ function friendlyFileError(fileName, rawMessage) {
   return msg;
 }
 
+// ---------------------------------------------------------------------------
+// Standardised response helpers
+// ---------------------------------------------------------------------------
+
+function errorBody(message, code) {
+  const body = { error: message };
+  if (code) body.code = code;
+  return body;
+}
+
+function buildFileResponse(f) {
+  return {
+    fileId: f.id,
+    fileName: f.name,
+    fileType: f.type,
+    state: f.state,
+    error: f.error || null
+  };
+}
+
+function buildProgress(session) {
+  const files = session.files || [];
+  return {
+    total: session.total,
+    completed: files.filter(f => f.state === 'complete').length,
+    failed: files.filter(f => f.state === 'failed').length,
+    results: session.results ? session.results.length : 0
+  };
+}
+
+function buildJobResponse(session) {
+  const progress = buildProgress(session);
+  return {
+    jobId: session.id,
+    status: session.status,
+    createdAt: new Date(session.createdAt).toISOString(),
+    files: session.files.map(buildFileResponse),
+    progress
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Multer setup
+// ---------------------------------------------------------------------------
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (req, file, cb) => {
@@ -141,6 +188,10 @@ const upload = multer({
   }
 });
 
+// ---------------------------------------------------------------------------
+// Session lifecycle
+// ---------------------------------------------------------------------------
+
 function pruneStaleSessions() {
   const now = Date.now();
   for (const [id, s] of sessions) {
@@ -152,147 +203,6 @@ function pruneStaleSessions() {
       sessions.delete(id);
     }
   }
-}
-
-export async function startWebServer(port = 3001) {
-  const app = express();
-
-  await fs.ensureDir(UPLOAD_DIR);
-
-  setInterval(pruneStaleSessions, 60_000).unref();
-
-  app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
-  });
-
-  app.use(express.static(path.join(__dirname, 'public')));
-
-  app.post('/api/upload', (req, res, next) => {
-    req.sessionId = newId();
-    next();
-  }, upload.array('zips'), (req, res) => {
-    const sessionId = req.sessionId;
-    const files = req.files || [];
-
-    if (files.length === 0) {
-      return res.status(400).json({ error: 'No files uploaded' });
-    }
-
-    const fileInfos = files.map((f, index) => ({
-      id: createFileId(f.originalname, index),
-      name: f.originalname,
-      path: f.path,
-      type: /\.riv$/i.test(f.originalname) ? 'riv' : 'zip',
-      state: 'uploaded'
-    }));
-
-    sessions.set(sessionId, {
-      id: sessionId,
-      createdAt: Date.now(),
-      files: fileInfos,
-      status: 'uploaded',
-      total: files.length,
-      current: 0,
-      results: [],
-      errors: [],
-      outputZip: null,
-      resultDir: null
-    });
-
-    res.json({
-      sessionId,
-      total: files.length,
-      files: fileInfos.map(f => ({ id: f.id, name: f.name, type: f.type, state: f.state }))
-    });
-  });
-
-  app.post('/api/process/:sessionId', async (req, res) => {
-    const session = sessions.get(req.params.sessionId);
-    if (!session) return res.status(404).json({ error: 'Session not found' });
-    if (session.status === 'processing') {
-      return res.status(409).json({ error: 'Already processing' });
-    }
-
-    session.status = 'processing';
-    session.current = 0;
-    session.results = [];
-    session.errors = [];
-    session.resultDir = path.join(TEMP_DIR, 'results', session.id);
-    await fs.ensureDir(session.resultDir);
-
-    for (const f of session.files) {
-      f.state = 'queued';
-    }
-
-    res.json({ sessionId: session.id, status: 'processing' });
-
-    processSession(session);
-  });
-
-  app.get('/api/status/:sessionId', (req, res) => {
-    const session = sessions.get(req.params.sessionId);
-    if (!session) return res.status(404).json({ error: 'Session not found' });
-
-    res.json({
-      status: session.status,
-      current: session.current,
-      total: session.total,
-      files: session.files.map(f => ({
-        id: f.id,
-        name: f.name,
-        type: f.type,
-        state: f.state,
-        error: f.error || null
-      })),
-      errors: session.errors,
-      results: session.results.length
-    });
-  });
-
-  app.get('/api/download/:sessionId', async (req, res) => {
-    const session = sessions.get(req.params.sessionId);
-    if (!session) return res.status(404).json({ error: 'Session not found' });
-    if (session.status !== 'complete') {
-      return res.status(400).json({ error: 'Not complete yet' });
-    }
-
-    const zipPath = session.outputZip;
-    if (!zipPath || !(await fs.pathExists(zipPath))) {
-      return res.status(404).json({ error: 'Result not found' });
-    }
-
-    res.download(zipPath, `backup-images-${session.id}.zip`, async () => {
-      await cleanupSession(session);
-    });
-  });
-
-  app.use((err, req, res, next) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File too large (max 200 MB)' });
-      }
-      if (err.code === 'LIMIT_FILE_COUNT') {
-        return res.status(400).json({ error: 'Too many files (max 50)' });
-      }
-      return res.status(400).json({ error: err.message });
-    }
-    if (err.message) {
-      return res.status(400).json({ error: err.message });
-    }
-    res.status(500).json({ error: 'Internal server error' });
-  });
-
-  return new Promise((resolve, reject) => {
-    const server = app.listen(port, '0.0.0.0', () => {
-      logger.stepSuccess(`Web interface at http://localhost:${port}`);
-      resolve(server);
-    });
-    server.on('error', reject);
-  });
 }
 
 async function processSession(session) {
@@ -440,6 +350,217 @@ async function cleanupSession(session) {
   await rmdir(getSessionWorkDir(session)).catch(() => {});
   await rmdir(path.join(UPLOAD_DIR, session.id)).catch(() => {});
   sessions.delete(session.id);
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers
+// ---------------------------------------------------------------------------
+
+function handleUpload(req, res) {
+  const sessionId = req.sessionId;
+  const files = req.files || [];
+
+  if (files.length === 0) {
+    return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
+  }
+
+  const fileInfos = files.map((f, index) => ({
+    id: createFileId(f.originalname, index),
+    name: f.originalname,
+    path: f.path,
+    type: /\.riv$/i.test(f.originalname) ? 'riv' : 'zip',
+    state: 'uploaded'
+  }));
+
+  const session = {
+    id: sessionId,
+    createdAt: Date.now(),
+    files: fileInfos,
+    status: 'uploaded',
+    total: files.length,
+    current: 0,
+    results: [],
+    errors: [],
+    outputZip: null,
+    resultDir: null
+  };
+
+  sessions.set(sessionId, session);
+
+  res.status(201).json(buildJobResponse(session));
+}
+
+function handleStartProcessing(req, res) {
+  const session = sessions.get(req.params.jobId);
+  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+  if (session.status === 'processing') {
+    return res.status(409).json(errorBody('Job is already processing', 'ALREADY_PROCESSING'));
+  }
+
+  session.status = 'processing';
+  session.current = 0;
+  session.results = [];
+  session.errors = [];
+  session.resultDir = path.join(TEMP_DIR, 'results', session.id);
+  fs.ensureDirSync(session.resultDir);
+
+  for (const f of session.files) {
+    f.state = 'queued';
+  }
+
+  res.json(buildJobResponse(session));
+
+  processSession(session);
+}
+
+function handleGetJob(req, res) {
+  const session = sessions.get(req.params.jobId);
+  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+
+  const response = buildJobResponse(session);
+  if (session.status === 'complete') {
+    response.download = `/api/v1/jobs/${session.id}/download`;
+  }
+  res.json(response);
+}
+
+function handleGetJobFiles(req, res) {
+  const session = sessions.get(req.params.jobId);
+  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+
+  res.json({
+    jobId: session.id,
+    files: session.files.map(buildFileResponse)
+  });
+}
+
+async function handleDownload(req, res) {
+  const session = sessions.get(req.params.jobId);
+  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+  if (session.status !== 'complete') {
+    return res.status(400).json(errorBody('Job is not complete yet', 'NOT_COMPLETE'));
+  }
+
+  const zipPath = session.outputZip;
+  if (!zipPath || !(await fs.pathExists(zipPath))) {
+    return res.status(404).json(errorBody('Result file not found', 'RESULT_NOT_FOUND'));
+  }
+
+  res.download(zipPath, `backup-images-${session.id}.zip`, async () => {
+    await cleanupSession(session);
+  });
+}
+
+function handleHealth(req, res) {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    version: APP_VERSION,
+    uptime: process.uptime()
+  });
+}
+
+function handleMulterError(err, req, res, next) {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json(errorBody('File too large (max 200 MB)', 'FILE_TOO_LARGE'));
+    }
+    if (err.code === 'LIMIT_FILE_COUNT') {
+      return res.status(400).json(errorBody('Too many files (max 50)', 'TOO_MANY_FILES'));
+    }
+    return res.status(400).json(errorBody(err.message, 'UPLOAD_ERROR'));
+  }
+  if (err.message) {
+    if (err.message === 'Only .zip and .riv files allowed') {
+      return res.status(400).json(errorBody(err.message, 'INVALID_FILE_TYPE'));
+    }
+    if (err.message === 'Unsafe filename rejected') {
+      return res.status(400).json(errorBody('Filename contains invalid characters', 'UNSAFE_FILENAME'));
+    }
+    return res.status(400).json(errorBody(err.message, 'BAD_REQUEST'));
+  }
+  res.status(500).json(errorBody('Internal server error', 'INTERNAL_ERROR'));
+}
+
+// ---------------------------------------------------------------------------
+// Server bootstrap
+// ---------------------------------------------------------------------------
+
+export async function startWebServer(port = 3001) {
+  const app = express();
+
+  await fs.ensureDir(UPLOAD_DIR);
+
+  setInterval(pruneStaleSessions, 60_000).unref();
+
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+  });
+
+  app.use(express.static(path.join(__dirname, 'public')));
+
+  // -----------------------------------------------------------------------
+  // v1 API router
+  // -----------------------------------------------------------------------
+
+  const v1 = express.Router();
+
+  v1.get('/health', handleHealth);
+
+  v1.post('/jobs', (req, res, next) => {
+    req.sessionId = newId();
+    next();
+  }, upload.array('files'), handleUpload);
+
+  v1.post('/jobs/:jobId/process', handleStartProcessing);
+
+  v1.get('/jobs/:jobId', handleGetJob);
+
+  v1.get('/jobs/:jobId/files', handleGetJobFiles);
+
+  v1.get('/jobs/:jobId/download', handleDownload);
+
+  v1.use(handleMulterError);
+
+  app.use('/api/v1', v1);
+
+  // -----------------------------------------------------------------------
+  // Legacy backward-compatible routes (same handlers, old paths)
+  // -----------------------------------------------------------------------
+
+  app.post('/api/upload', (req, res, next) => {
+    req.sessionId = newId();
+    next();
+  }, upload.array('zips'), handleUpload);
+
+  app.post('/api/process/:sessionId', (req, res) => {
+    req.params.jobId = req.params.sessionId;
+    handleStartProcessing(req, res);
+  });
+
+  app.get('/api/status/:sessionId', (req, res) => {
+    req.params.jobId = req.params.sessionId;
+    handleGetJob(req, res);
+  });
+
+  app.get('/api/download/:sessionId', (req, res) => {
+    req.params.jobId = req.params.sessionId;
+    handleDownload(req, res);
+  });
+
+  app.use(handleMulterError);
+
+  return new Promise((resolve, reject) => {
+    const server = app.listen(port, '0.0.0.0', () => {
+      logger.stepSuccess(`Web interface at http://localhost:${port}`);
+      resolve(server);
+    });
+    server.on('error', reject);
+  });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
