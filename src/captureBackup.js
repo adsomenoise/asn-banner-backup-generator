@@ -124,7 +124,7 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
       metrics.increment('capture.load_error');
       throw new Error(`Failed to load creative URL ${url}: ${error.message}`);
     }
-    await page.waitForLoadState('load', { timeout: 3000 }).catch(() => {});
+    await page.waitForLoadState('load', { timeout: 1000 }).catch(() => {});
 
     if (strategy === 'auto' || strategy === 'query') {
       backupReady = await checkBackupReady(page);
@@ -148,26 +148,30 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
     }
 
     if (!backupReady) {
-      log.step('Waiting for content to load...');
-      await page.evaluate(() => new Promise(r => {
-        let n = 0;
-        (function poll() {
-          const c = document.querySelector('canvas');
-          if (c) {
-            try {
-              const ctx = c.getContext('2d');
-              if (ctx) {
-                const d = ctx.getImageData(0, 0, c.width, c.height).data;
-                for (let i = 3; i < d.length; i += 4) {
-                  if (d[i] > 0) { r(true); return; }
+      const hasCanvas = await page.evaluate(() => !!document.querySelector('canvas'));
+
+      if (hasCanvas) {
+        log.step('Waiting for content to load...');
+        await page.evaluate(() => new Promise(r => {
+          let n = 0;
+          (function poll() {
+            const c = document.querySelector('canvas');
+            if (c) {
+              try {
+                const ctx = c.getContext('2d');
+                if (ctx) {
+                  const d = ctx.getImageData(0, 0, c.width, c.height).data;
+                  for (let i = 3; i < d.length; i += 4) {
+                    if (d[i] > 0) { r(true); return; }
+                  }
                 }
-              }
-            } catch (e) {}
-          }
-          if (++n > 15) { r(false); return; }
-          setTimeout(poll, 200);
-        })();
-      }));
+              } catch (e) {}
+            }
+            if (++n > 15) { r(false); return; }
+            setTimeout(poll, 200);
+          })();
+        }));
+      }
 
       const maxFrames = Math.ceil(waitTimeout / 6);
       const batchSize = 400;
@@ -175,7 +179,9 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
       let lastHash = null;
       let stable = false;
 
-      log.step('Advancing animation frames...');
+      if (hasCanvas) {
+        log.step('Advancing animation frames...');
+      }
 
       while (totalDrained < maxFrames && !stable) {
         const drained = await page.evaluate((n) => window.__drainRAF(n), batchSize);

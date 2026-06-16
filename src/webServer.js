@@ -217,6 +217,7 @@ async function processJob(jobId) {
       try {
         file.setState('processing');
         fileLog.info('Processing file', { fileType: file.type });
+        await jobStore.update(jobId, { files: job.files });
 
         const captureOpts = {
           waitTimeout: 15000,
@@ -250,6 +251,7 @@ async function processJob(jobId) {
 
           keepDir = true;
           file.setState('complete');
+          await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'riv' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
           return { name: sanitized, type: 'riv', creativeDir };
@@ -271,6 +273,7 @@ async function processJob(jobId) {
 
           keepDir = true;
           file.setState('complete');
+          await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'zip' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
           return { name: sanitized, type: 'zip', creativeDir: null };
@@ -279,6 +282,7 @@ async function processJob(jobId) {
         const errorMsg = err.message;
         fileLog.error('File failed', { error: errorMsg, code: 'FILE_PROCESSING_ERROR' });
         file.setState('failed', friendlyFileError(file.name, errorMsg));
+        await jobStore.update(jobId, { files: job.files, errors: job.errors });
         job.errors.push({ file: file.name, error: errorMsg, friendly: file.error });
         metrics.increment('file.failed', { type: file.type, reason: classifyError(errorMsg) });
         return null;
@@ -669,6 +673,7 @@ export async function startWebServer(port = 3001, opts = {}) {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-XSS-Protection', '0');
     res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     next();
   });
 
