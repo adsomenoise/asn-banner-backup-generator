@@ -367,7 +367,7 @@ All API endpoints (except `/api/v1/health`) require authentication when the serv
 ### Configuration
 
 ```js
-// startWebServer accepts an optional auth config object
+// startWebServer accepts an optional auth config object and security options
 await startWebServer(3001, {
   auth: {
     mode: 'production',             // 'development' | 'production'
@@ -376,7 +376,9 @@ await startWebServer(3001, {
       tenantId: 'x-tenant-id',
       clientId: 'x-client-id'
     }
-  }
+  },
+  corsOrigin: 'https://my-platform.com',  // restrict CORS (default: '*')
+  rateLimitMax: 30                         // POST requests per 60s/IP (default: 30)
 });
 ```
 
@@ -447,6 +449,24 @@ await startWebServer(3001, {
 - **Max files**: 50 per upload request (configurable via `MAX_UPLOAD_FILES`).
 - **Filename safety**: uploads with `..`, `/`, or `\` in the original name are rejected.
 - **Session TTL**: idle sessions are pruned after 30 minutes.
+- **ZIP magic-byte validation**: uploaded `.zip` files are checked for the `PK\x03\x04` magic bytes before processing; files without a valid ZIP header are rejected with `INVALID_FILE_TYPE`.
+- **File type filtering**: the multer `fileFilter` rejects any file that does not end in `.zip` or `.riv`.
+
+### HTTP Security
+
+- **Security headers** are set on every response:
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `X-XSS-Protection: 0`
+  - `Referrer-Policy: no-referrer`
+- **CORS** is configurable via `startWebServer(port, { corsOrigin })`. Defaults to `*` for local development. In production, set to the specific origin of the parent platform.
+- **Rate limiting** is applied to mutation endpoints (`POST /api/v1/jobs` and `POST /api/v1/jobs/:jobId/process`). Default: 30 requests per 60-second window per IP. Configurable via `rateLimitMax` option.
+- **Local server scoping**: each job's Playwright-accessible file server is scoped to that job's work directory only — files from other jobs are not accessible.
+- **Playwright browser context** is launched with `--disable-web-security` (required to load cross-origin Rive resources via CDN). This is acceptable because the local server only serves job-scoped directories and binds to `localhost`.
+
+### HTML Template
+
+- The `generateRiveHTML()` function applies **HTML escaping** to the JS filename inserted into the `<title>` tag and **JS string escaping** to the filename used in the Rive constructor `src` argument, preventing XSS via crafted filenames.
 
 ### Concurrency
 
@@ -467,10 +487,17 @@ The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the re
 - **Friendly error mapping**: common cryptic errors are mapped to actionable messages. Unknown errors pass through as-is.
 - **`errors.json`**: when any file in a session fails, the download ZIP includes an `errors.json` with `{file, error, friendly}` entries for every failure.
 
+### Threat Model Assumptions
+
+- The service is deployed behind an **authenticated reverse proxy** that strips downstream headers and injects a trusted `X-User-Id` (or equivalent) header. The service itself does not implement user-facing login or session management.
+- The local file server binds to `localhost` and is never exposed to external traffic.
+- The global rate limiter is an in-memory token bucket — it resets on process restart. For multi-instance deployments, a shared rate limiter (e.g. Redis) should be added via custom middleware.
+- The `--disable-web-security` Playwright flag is required for Rive CDN cross-origin loading and is safe because the URLs Playwright navigates to are always derived from job-scoped storage paths.
+
 ### Known Tradeoffs
 
 - Playwright requires Chromium installed (`npx playwright install chromium`); on Linux, system dependencies are needed (`npx playwright install-deps chromium`).
-- The local file server serves all extracted content without authentication — it is intended only for local use.
+- The local file server serves extracted content without authentication — it is intended only for local Playwright access.
 - Sessions are stored in memory; restarting the web server loses all active and completed sessions.
 
 ## Tests
@@ -480,17 +507,22 @@ npm test            # Run all tests
 npm run test:watch  # Re-run on file changes
 ```
 
-Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`.
+Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`, `test/security.test.js`.
 
 Tests cover:
 - ZIP path-traversal safety (`isPathSafe`)
 - ZIP extraction limits (max entries, max entry size, max total size) and filtration (`__MACOSX`, dotfiles)
 - HTML banner discovery (single file, subdirectories, shallowest preference, ignored dirs)
 - Dimension parsing from HTML meta/canvas/div tags and filenames
-- Rive HTML template generation
+- Rive HTML template generation and XSS escaping
 - JPEG quality tier fallback (size cap, preferred-quality priority)
 - Output file deduplication
 - Playwright navigation error resilience
+- API v1 contract: 22 HTTP tests for health, upload, process, status, files, download, error shapes, legacy aliases
+- Auth integration: 33 tests for adapter unit, production 401, own-job access, cross-user 404, tenant isolation, health bypass, legacy auth
+- Job model + store: 48 tests for FileInfo, Job transitions/ownership/toJSON, InMemoryJobStore CRUD/lifecycle
+- Storage isolation: 27 tests for path construction, directory lifecycle, cleanup cross-contamination, URL traversal rejection, result ZIP streaming, stale pruning
+- Security hardening: 14 tests for security headers, CORS configuration, HTML escaping, ZIP magic-byte validation, rate limiting
 
 ## Project Structure
 

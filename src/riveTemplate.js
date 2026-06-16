@@ -7,12 +7,32 @@ export function parseRivDimensions(fileName) {
   return null;
 }
 
+function escapeHTML(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeJSString(str) {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
 export function generateRiveHTML(jsFileName, width, height) {
+  const title = escapeHTML(jsFileName.replace(/\.js$/i, ''));
+  const jsSrc = escapeJSString(jsFileName);
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>${jsFileName.replace(/\.js$/i, '')}</title>
+  <title>${title}</title>
   <meta name="ad.size" content="width=${width},height=${height}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
@@ -101,7 +121,7 @@ export function generateRiveHTML(jsFileName, width, height) {
       setupCanvas();
 
       var riveInstance = new rive.Rive({
-        src: '${jsFileName}',
+        src: '${jsSrc}',
         canvas: canvas,
         stateMachines: "State Machine 1",
         autoplay: true,

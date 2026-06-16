@@ -165,9 +165,26 @@ function json(r) {
   return r.json();
 }
 
+// Minimal valid ZIP buffer (empty archive with proper magic bytes)
+const MINI_ZIP = Buffer.from([
+  0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x50, 0x4b, 0x01, 0x02, 0x3f, 0x00, 0x14, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+]);
+
 async function createJob(base, headers) {
   const body = new FormData();
-  body.append('files', new Blob(['test'], { type: 'application/octet-stream' }), 'dummy.zip');
+  body.append('files', new Blob([MINI_ZIP], { type: 'application/zip' }), 'dummy.zip');
   const res = await fetch(`${base}/jobs`, { method: 'POST', headers, body });
   return { status: res.status, body: await json(res) };
 }
@@ -399,7 +416,7 @@ describe('Production auth — legacy aliases', () => {
 
   it('POST /api/upload with auth header succeeds', async () => {
     const body = new FormData();
-    body.append('zips', new Blob(['test'], { type: 'application/octet-stream' }), 'legacy.zip');
+    body.append('zips', new Blob([MINI_ZIP], { type: 'application/zip' }), 'legacy.zip');
     const res = await fetch(`${legacyBase}/upload`, {
       method: 'POST',
       headers: { 'x-user-id': 'legacy-user' },
@@ -429,14 +446,14 @@ describe('Dev mode (no auth config)', () => {
 
   it('accepts requests without any auth headers', async () => {
     const body = new FormData();
-    body.append('files', new Blob(['test'], { type: 'application/octet-stream' }), 'dev.zip');
+    body.append('files', new Blob([MINI_ZIP], { type: 'application/zip' }), 'dev.zip');
     const res = await fetch(`${base}/jobs`, { method: 'POST', body });
     assert.strictEqual(res.status, 201);
   });
 
   it('creates jobs under dev-user identity', async () => {
     const body = new FormData();
-    body.append('files', new Blob(['test'], { type: 'application/octet-stream' }), 'dev2.zip');
+    body.append('files', new Blob([MINI_ZIP], { type: 'application/zip' }), 'dev2.zip');
     const res = await (await fetch(`${base}/jobs`, { method: 'POST', body })).json();
     const jobRes = await fetch(`${base}/jobs/${res.jobId}`);
     assert.strictEqual(jobRes.status, 200);

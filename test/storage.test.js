@@ -178,6 +178,32 @@ describe('LocalStorage', () => {
       const url = storage.toPublicUrl(3000, p);
       assert.ok(url.includes('my%20file.html'));
     });
+
+    it('resolves relative to a custom serve root', () => {
+      const serveRoot = path.join(storage.root, 'work', 'j1');
+      const p = path.join(serveRoot, 'file-001', 'extracted', 'index.html');
+      const url = storage.toPublicUrl(3000, p, serveRoot);
+      assert.ok(url.startsWith('http://localhost:3000/'));
+      assert.ok(url.includes('file-001'));
+      assert.ok(url.includes('extracted'));
+      assert.ok(url.includes('index.html'));
+      assert.ok(!url.includes('work/j1'));
+    });
+
+    it('rejects path outside custom serve root', () => {
+      const serveRoot = path.join(storage.root, 'work', 'j1');
+      assert.throws(
+        () => storage.toPublicUrl(3000, '/etc/passwd', serveRoot),
+        /Path traversal/
+      );
+    });
+
+    it('falls back to storage root when no relativeTo given', () => {
+      const p = path.join(storage.root, 'results', 'j1', 'out.zip');
+      const url = storage.toPublicUrl(3000, p);
+      assert.ok(url.startsWith('http://localhost:3000/'));
+      assert.ok(url.includes('results'));
+    });
   });
 
   // -----------------------------------------------------------------------

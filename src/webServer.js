@@ -346,6 +346,20 @@ async function handleUpload(req, res) {
     return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
   }
 
+  // ZIP magic-byte validation
+  const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  for (const f of files) {
+    if (/\.zip$/i.test(f.originalname)) {
+      const fd = fs.openSync(f.path, 'r');
+      const buf = Buffer.alloc(4);
+      fs.readSync(fd, buf, 0, 4, 0);
+      fs.closeSync(fd);
+      if (!buf.equals(ZIP_MAGIC)) {
+        return res.status(400).json(errorBody(`File "${f.originalname}" has invalid ZIP magic bytes`, 'INVALID_FILE_TYPE'));
+      }
+    }
+  }
+
   const auth = req.auth || {};
 
   const fileInfos = files.map((f, index) => new FileInfo({
@@ -554,12 +568,12 @@ export async function startWebServer(port = 3001, opts = {}) {
 
   const v1 = express.Router();
 
-  v1.post('/jobs', (req, res, next) => {
+  v1.post('/jobs', rateLimiter, (req, res, next) => {
     req.sessionId = newId();
     next();
   }, upload.array('files'), handleUpload);
 
-  v1.post('/jobs/:jobId/process', handleStartProcessing);
+  v1.post('/jobs/:jobId/process', rateLimiter, handleStartProcessing);
 
   v1.get('/jobs/:jobId', handleGetJob);
 
