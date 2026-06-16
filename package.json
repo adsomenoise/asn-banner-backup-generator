@@ -1,0 +1,40 @@
+{
+  "name": "rive-backup-generator",
+  "version": "1.0.0",
+  "description": "Batch-process HTML5 banner ZIP files and generate static JPG backup images for ad platforms",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "generate": "node src/index.js",
+    "generate:dev": "node --watch src/index.js",
+    "serve": "node src/webServer.js",
+    "serve:dev": "node --watch src/webServer.js",
+    "test": "node --test",
+"test:watch": "node --test --watch"
+  },
+  "keywords": [
+    "html5-banner",
+    "rive",
+    "backup-image",
+    "ad-platform",
+    "playwright",
+    "cm360",
+    "dv360"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "express": "^4.21.2",
+    "fs-extra": "^11.3.0",
+    "minimist": "^1.2.8",
+    "multer": "^2.2.0",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "playwright": "^1.50.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
