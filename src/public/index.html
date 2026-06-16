@@ -32,6 +32,10 @@
   --progress-bg: #2a2a2a;
   --errors-bg: #2d1515;
   --errors-border: #4a1a1a;
+  --state-queued: #6b7280;
+  --state-processing: #fbbf24;
+  --state-done: #10b981;
+  --state-failed: #ef4444;
 }
 
 @media (prefers-color-scheme: light) {
@@ -59,6 +63,10 @@
     --progress-bg: #e5e7eb;
     --errors-bg: #fef2f2;
     --errors-border: #fecaca;
+    --state-queued: #9ca3af;
+    --state-processing: #d97706;
+    --state-done: #059669;
+    --state-failed: #dc2626;
   }
 }
 
@@ -107,7 +115,7 @@ body {
 .file-list { margin-top: 1.25rem; display: none; }
 .file-list.visible { display: block; }
 .file-item {
-  display: flex; align-items: center; gap: 0.75rem;
+  display: flex; align-items: flex-start; gap: 0.75rem;
   padding: 0.625rem 0.875rem; background: var(--bg-card); border-radius: 10px;
   margin-bottom: 0.375rem; border: 1px solid var(--border);
   transition: border-color .15s;
@@ -120,6 +128,7 @@ body {
   padding: 1px 7px; border-radius: 5px;
   font-size: 0.6875rem; font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.03em; line-height: 1.5;
+  flex-shrink: 0;
 }
 .file-type-badge.zip { background: var(--badge-zip-bg); color: var(--badge-zip-text); }
 .file-type-badge.riv { background: var(--badge-riv-bg); color: var(--badge-riv-text); }
@@ -128,15 +137,52 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .file-size { font-size: 0.8125rem; color: var(--text-muted); white-space: nowrap; }
-.file-status { font-size: 0.8125rem; font-weight: 500; white-space: nowrap; }
-.status-uploaded { color: var(--text-soft); }
-.status-processing { color: #fbbf24; }
-.status-done { color: #10b981; }
-.status-error { color: #f87171; }
 
-/* Actions */
+/* State badges */
+.state-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 0.6875rem; font-weight: 600; white-space: nowrap;
+  padding: 2px 7px; border-radius: 999px; line-height: 1.4;
+  flex-shrink: 0;
+}
+.state-badge.uploaded { background: #374151; color: var(--text-soft); }
+.state-badge.queued { background: #374151; color: var(--state-queued); }
+.state-badge.processing { background: #3b3410; color: var(--state-processing); }
+.state-badge.complete { background: #0c3623; color: var(--state-done); }
+.state-badge.failed { background: #3b1515; color: var(--state-failed); }
+
+@media (prefers-color-scheme: light) {
+  .state-badge.uploaded { background: #e5e7eb; color: var(--text-soft); }
+  .state-badge.queued { background: #e5e7eb; color: var(--state-queued); }
+  .state-badge.processing { background: #fef3c7; color: var(--state-processing); }
+  .state-badge.complete { background: #d1fae5; color: var(--state-done); }
+  .state-badge.failed { background: #fee2e2; color: var(--state-failed); }
+}
+
+.state-badge .spinner {
+  display: inline-block; width: 8px; height: 8px;
+  border: 1.5px solid transparent; border-top-color: currentColor;
+  border-radius: 50%; animation: spin .6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.state-badge .check { font-weight: 700; }
+.state-badge .cross { font-weight: 700; }
+
+/* File error */
+.file-error {
+  font-size: 0.75rem; color: var(--state-failed); margin-top: 0.375rem;
+  line-height: 1.4; word-break: break-word;
+}
+
+/* Actions bar */
 .actions {
   display: flex; gap: 0.625rem; margin-top: 1rem;
+}
+.actions-col {
+  display: flex; flex-direction: column; gap: 0.5rem; width: 100%;
+}
+.actions-row {
+  display: flex; gap: 0.625rem;
 }
 .btn {
   flex: 1; padding: 0.75rem 1.5rem; border: none; border-radius: 10px;
@@ -153,9 +199,13 @@ body {
 }
 .btn-secondary:hover:not(:disabled) { background: var(--btn-secondary-hover); }
 .btn-success {
-  background: #10b981; color: #fff;
+  background: var(--state-done); color: #fff;
 }
 .btn-success:hover:not(:disabled) { background: #059669; }
+.btn-retry {
+  background: var(--state-failed); color: #fff;
+}
+.btn-retry:hover:not(:disabled) { background: #dc2626; }
 
 /* Progress */
 .progress-wrap { margin-top: 1rem; display: none; }
@@ -170,16 +220,6 @@ body {
 .progress-text {
   font-size: 0.8125rem; color: var(--text-muted); margin-top: 0.5rem;
 }
-
-/* Errors */
-.errors-box {
-  margin-top: 0.75rem; padding: 0.75rem 0.875rem;
-  background: var(--errors-bg); border: 1px solid var(--errors-border); border-radius: 10px;
-  font-size: 0.8125rem; display: none;
-}
-.errors-box.visible { display: block; }
-.errors-box h3 { color: #f87171; font-size: 0.8125rem; font-weight: 600; margin-bottom: 0.375rem; }
-.errors-box li { color: #f87171; margin-left: 1rem; margin-bottom: 0.125rem; }
 
 /* Overlay */
 .overlay {
@@ -220,16 +260,20 @@ body {
   <div class="file-list" id="fileList"></div>
 
   <div class="actions">
-    <button class="btn btn-primary" id="processBtn" disabled>Generate backups</button>
-    <button class="btn btn-success" id="downloadBtn" style="display:none">Download ZIP</button>
+    <div class="actions-col">
+      <div class="actions-row">
+        <button class="btn btn-primary" id="processBtn" disabled>Generate backups</button>
+        <button class="btn btn-success" id="downloadBtn" style="display:none">Download ZIP</button>
+        <button class="btn btn-retry" id="retryBtn" style="display:none">Retry failed</button>
+        <button class="btn btn-secondary" id="resetBtn" style="display:none">Start over</button>
+      </div>
+    </div>
   </div>
 
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
     <div class="progress-text" id="progressText"></div>
   </div>
-
-  <div class="errors-box" id="errorsBox"><h3>Errors</h3><ul id="errorsList"></ul></div>
 </div>
 
 <div class="overlay" id="overlay">
@@ -239,7 +283,7 @@ body {
 
 <script>
 let sessionId = null;
-let uploadedFiles = [];
+let sessionFiles = [];    // { id, name, type, state }
 let polling = false;
 let completed = false;
 
@@ -248,11 +292,11 @@ const fileInput = document.getElementById('fileInput');
 const fileList = document.getElementById('fileList');
 const processBtn = document.getElementById('processBtn');
 const downloadBtn = document.getElementById('downloadBtn');
+const retryBtn = document.getElementById('retryBtn');
+const resetBtn = document.getElementById('resetBtn');
 const progressWrap = document.getElementById('progressWrap');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
-const errorsBox = document.getElementById('errorsBox');
-const errorsList = document.getElementById('errorsList');
 const overlay = document.getElementById('overlay');
 const waitingText = document.getElementById('waitingText');
 
@@ -301,65 +345,115 @@ function handleFiles(files) {
   const newFiles = Array.from(files).filter(f => /\.(zip|riv)$/i.test(f.name));
   if (newFiles.length === 0) return alert('Please select .zip or .riv files only');
 
-  // If a previous batch completed, start fresh
   if (completed) {
     resetUI();
-    completed = false;
   }
 
-  // Deduplicate by name — keep existing, only add new names
-  const existingNames = new Set(uploadedFiles.map(f => f.name));
+  const existingNames = new Set(sessionFiles.map(f => f.name));
   const trulyNew = newFiles.filter(f => !existingNames.has(f.name));
   if (trulyNew.length === 0) return;
 
-  uploadedFiles = [...uploadedFiles, ...trulyNew];
-
   const form = new FormData();
-  uploadedFiles.forEach(f => form.append('zips', f));
+  trulyNew.forEach(f => form.append('zips', f));
 
-  addFilesToUI(trulyNew, 'uploading');
   processBtn.disabled = true;
 
   fetch('/api/upload', { method: 'POST', body: form })
     .then(r => r.json())
     .then(data => {
       sessionId = data.sessionId;
-      markFileStatuses('uploaded');
+      sessionFiles = [...sessionFiles, ...data.files];
+      renderFileList();
       processBtn.disabled = false;
     })
     .catch(err => {
-      markFileStatuses('error');
       alert('Upload failed: ' + err.message);
     });
 }
 
-function addFilesToUI(files, status) {
+function renderFileList() {
   fileList.classList.add('visible');
-  files.forEach(f => {
-    const ext = f.name.match(/\.(\w+)$/i)?.[1]?.toLowerCase() || '';
+  fileList.innerHTML = '';
+  sessionFiles.forEach(f => {
+    const ext = f.type;
+    const state = f.state || 'uploaded';
     const div = document.createElement('div');
     div.className = 'file-item';
-    div.dataset.name = f.name;
+    div.dataset.fileId = f.id;
+
+    let stateHtml = '';
+    if (state === 'uploaded') {
+      stateHtml = `<span class="state-badge uploaded">uploaded</span>`;
+    } else if (state === 'queued') {
+      stateHtml = `<span class="state-badge queued">queued</span>`;
+    } else if (state === 'processing') {
+      stateHtml = `<span class="state-badge processing"><span class="spinner"></span> processing</span>`;
+    } else if (state === 'complete') {
+      stateHtml = `<span class="state-badge complete"><span class="check">&#10003;</span> done</span>`;
+    } else if (state === 'failed') {
+      stateHtml = `<span class="state-badge failed"><span class="cross">&#10007;</span> failed</span>`;
+    }
+
+    const errorHtml = state === 'failed' && f.error
+      ? `<div class="file-error">${escapeHtml(f.error)}</div>`
+      : '';
+
     div.innerHTML = `
       <div class="file-item-col">
         <div class="file-item-row">
           <span class="file-type-badge ${ext}">${ext}</span>
-          <span class="file-name">${f.name}</span>
+          <span class="file-name">${escapeHtml(f.name)}</span>
         </div>
+        ${errorHtml}
       </div>
-      <span class="file-size">${(f.size / 1024).toFixed(0)} KB</span>
-      <span class="file-status status-${status}">${status}</span>
+      ${stateHtml}
     `;
     fileList.appendChild(div);
   });
 }
 
-function markFileStatuses(status) {
-  fileList.querySelectorAll('.file-item').forEach(el => {
-    const span = el.querySelector('.file-status');
-    span.className = 'file-status status-' + status;
-    span.textContent = status;
+function updateFileState(fileId, newState, errorMsg) {
+  const f = sessionFiles.find(x => x.id === fileId);
+  if (!f) return;
+  f.state = newState;
+  if (errorMsg) f.error = errorMsg;
+  const el = fileList.querySelector(`[data-file-id="${fileId}"]`);
+  if (!el) return;
+  const badge = el.querySelector('.state-badge');
+  const existingError = el.querySelector('.file-error');
+
+  let stateHtml = '';
+  if (newState === 'uploaded') stateHtml = `<span class="state-badge uploaded">uploaded</span>`;
+  else if (newState === 'queued') stateHtml = `<span class="state-badge queued">queued</span>`;
+  else if (newState === 'processing') stateHtml = `<span class="state-badge processing"><span class="spinner"></span> processing</span>`;
+  else if (newState === 'complete') stateHtml = `<span class="state-badge complete"><span class="check">&#10003;</span> done</span>`;
+  else if (newState === 'failed') stateHtml = `<span class="state-badge failed"><span class="cross">&#10007;</span> failed</span>`;
+
+  if (badge) badge.outerHTML = stateHtml;
+
+  if (newState === 'failed' && errorMsg) {
+    if (existingError) {
+      existingError.textContent = errorMsg;
+    } else {
+      const errDiv = document.createElement('div');
+      errDiv.className = 'file-error';
+      errDiv.textContent = errorMsg;
+      el.querySelector('.file-item-col').appendChild(errDiv);
+    }
+  } else if (newState !== 'failed' && existingError) {
+    existingError.remove();
+  }
+}
+
+function updateAllFromServer(files) {
+  files.forEach(sf => {
+    const local = sessionFiles.find(x => x.id === sf.id);
+    if (local) {
+      local.state = sf.state;
+      if (sf.error) local.error = sf.error;
+    }
   });
+  renderFileList();
 }
 
 processBtn.addEventListener('click', async () => {
@@ -367,15 +461,16 @@ processBtn.addEventListener('click', async () => {
 
   processBtn.disabled = true;
   downloadBtn.style.display = 'none';
-  errorsBox.classList.remove('visible');
-  errorsList.innerHTML = '';
+  retryBtn.style.display = 'none';
+  resetBtn.style.display = 'none';
   overlay.classList.add('visible');
   startWaitingText();
   progressWrap.classList.add('visible');
   progressFill.style.width = '0%';
   progressText.textContent = 'Starting...';
 
-  markFileStatuses('processing');
+  sessionFiles.forEach(f => { f.state = 'queued'; });
+  renderFileList();
 
   const res = await fetch(`/api/process/${sessionId}`, { method: 'POST' });
   if (!res.ok) {
@@ -395,15 +490,20 @@ async function pollStatus() {
       const res = await fetch(`/api/status/${sessionId}`);
       const data = await res.json();
 
-      const pct = data.total > 0 ? (data.current / data.total * 100) : 0;
-      progressFill.style.width = Math.min(pct, 99) + '%';
-      progressText.textContent = data.status === 'processing'
-        ? `Processing ${data.current} of ${data.total}...`
-        : data.status;
+      if (data.files) {
+        data.files.forEach(sf => {
+          updateFileState(sf.id, sf.state, sf.error);
+        });
+      }
 
-      if (data.errors && data.errors.length > 0) {
-        errorsBox.classList.add('visible');
-        errorsList.innerHTML = data.errors.map(e => `<li>${escapeHtml(e.file || e.zip)}: ${escapeHtml(e.error)}</li>`).join('');
+      const done = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : data.current;
+      const total = data.total;
+      const pct = total > 0 ? (done / total * 100) : 0;
+      progressFill.style.width = Math.min(pct, 100) + '%';
+
+      if (data.status === 'processing') {
+        const doneCount = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : 0;
+        progressText.textContent = `Processing ${doneCount} of ${total}...`;
       }
 
       if (data.status === 'complete') {
@@ -411,9 +511,25 @@ async function pollStatus() {
         overlay.classList.remove('visible');
         stopWaitingText();
         progressFill.style.width = '100%';
-        progressText.textContent = `Complete — ${data.results} image(s) generated`;
-        downloadBtn.style.display = 'block';
-        markFileStatuses('done');
+
+        const successCount = data.results;
+        const failCount = data.files ? data.files.filter(f => f.state === 'failed').length : 0;
+
+        if (failCount > 0 && successCount > 0) {
+          progressText.textContent = `Complete — ${successCount} image(s) generated, ${failCount} failed`;
+        } else if (failCount > 0) {
+          progressText.textContent = `All ${failCount} file(s) failed`;
+        } else {
+          progressText.textContent = `Complete — ${successCount} image(s) generated`;
+        }
+
+        if (successCount > 0) {
+          downloadBtn.style.display = 'block';
+        }
+        if (failCount > 0) {
+          retryBtn.style.display = 'block';
+        }
+        resetBtn.style.display = 'block';
         polling = false;
         return;
       }
@@ -423,6 +539,7 @@ async function pollStatus() {
         overlay.classList.remove('visible');
         stopWaitingText();
         progressText.textContent = 'Processing failed';
+        resetBtn.style.display = 'block';
         polling = false;
         return;
       }
@@ -448,14 +565,33 @@ downloadBtn.addEventListener('click', () => {
   }, 3000);
 });
 
+retryBtn.addEventListener('click', () => {
+  if (!sessionId) return;
+  // Reset failed files back to uploaded for re-processing
+  sessionFiles.forEach(f => {
+    if (f.state === 'failed') {
+      f.state = 'uploaded';
+      delete f.error;
+    }
+  });
+  renderFileList();
+  processBtn.click();
+});
+
+resetBtn.addEventListener('click', resetUI);
+
 function resetUI() {
   sessionId = null;
-  uploadedFiles = [];
+  sessionFiles = [];
   completed = false;
   fileList.classList.remove('visible');
   fileList.innerHTML = '';
   processBtn.disabled = true;
   downloadBtn.style.display = 'none';
+  downloadBtn.disabled = false;
+  downloadBtn.textContent = 'Download ZIP';
+  retryBtn.style.display = 'none';
+  resetBtn.style.display = 'none';
   progressWrap.classList.remove('visible');
 }
 

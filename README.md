@@ -43,13 +43,23 @@ node src/index.js \
 
 ## Usage — Web Interface
 
-Drag-and-drop interface for batch processing:
-
 ```bash
 npm run serve
 ```
 
-Open `http://localhost:3001` in your browser. Drop ZIP files onto the drop zone, click **Process**, then download all JPGs as a ZIP.
+Open `http://localhost:3001` in your browser.
+
+### Workflow
+
+1. **Drop files** onto the drop zone (`.zip` or `.riv`, multiple allowed).
+2. Each file appears in the list with a state badge: `uploaded` → `queued` → `processing` (with spinner) → `done` or `failed`.
+3. Click **Generate backups** to start processing. An overlay with an animation GIF and cycling messages appears.
+4. On completion:
+   - **Success**: files show a green checkmark.
+   - **Failure**: files show a red cross with an inline explanation (e.g. missing dimensions, no HTML found).
+   - **Partial success**: download button still appears for successful files; a **Retry failed** button lets you re-process only the failed ones.
+   - **Start over** resets everything.
+5. Click **Download ZIP** to get a single archive containing: JPGs for successful files, nested per-creative ZIPs (`.html` + `.js`) for `.riv` files, and `errors.json` if any file failed.
 
 ## How It Works
 
@@ -113,6 +123,9 @@ The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the re
 - Background processing in the web server is wrapped in a try/catch — if any part of the job fails, the session transitions to `error` status (never stuck in `processing`).
 - Temporary files (uploaded ZIPs, extracted directories, result JPGs) are cleaned up on success and failure.
 - Playwright browser contexts are closed reliably via `try/finally` in `captureBackup.js`.
+- **Per-file error tracking**: each file has an independent `state` (`uploaded` → `queued` → `processing` → `complete`/`failed`). Failed files include a user-friendly error message explaining the issue (e.g. missing `.html` in ZIP, missing dimensions in `.riv` filename, file too large).
+- **Friendly error mapping**: common cryptic errors are mapped to actionable messages. Unknown errors pass through as-is.
+- **`errors.json`**: when any file in a session fails, the download ZIP includes an `errors.json` with `{file, error, friendly}` entries for every failure.
 
 ### Known Tradeoffs
 
@@ -127,14 +140,17 @@ npm test            # Run all tests
 npm run test:watch  # Re-run on file changes
 ```
 
+Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`.
+
 Tests cover:
 - ZIP path-traversal safety (`isPathSafe`)
-- ZIP extraction limits and filtering
-- HTML banner discovery
+- ZIP extraction limits (max entries, max entry size, max total size) and filtration (`__MACOSX`, dotfiles)
+- HTML banner discovery (single file, subdirectories, shallowest preference, ignored dirs)
 - Dimension parsing from HTML meta/canvas/div tags and filenames
 - Rive HTML template generation
-- JPEG quality tier fallback
+- JPEG quality tier fallback (size cap, preferred-quality priority)
 - Output file deduplication
+- Playwright navigation error resilience
 
 ## Project Structure
 
@@ -154,7 +170,10 @@ rive-backup-generator/
 │   ├── localServer.js  # Static file server (factory pattern)
 │   ├── riveTemplate.js # Rive HTML template generator
 │   ├── logger.js
-│   └── utils.js
+│   ├── utils.js
+│   └── public/         # Web UI frontend
+│       ├── index.html
+│       └── animation.gif
 ├── package.json
 └── README.md
 ```

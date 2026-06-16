@@ -84,6 +84,36 @@ function getServedUrl(port, absolutePath) {
   return `http://localhost:${port}/${urlPath}`;
 }
 
+function friendlyFileError(fileName, rawMessage) {
+  const msg = String(rawMessage);
+
+  if (msg.includes('path traversal') || msg.includes('max ')) {
+    return 'This file looks suspicious or malformed. It may contain path traversal entries or exceed limits.';
+  }
+  if (msg.includes('No .html file found')) {
+    return 'The ZIP must contain at least one .html file. None was found.';
+  }
+  if (msg.includes('Could not parse dimensions')) {
+    return 'The .riv filename must include dimensions, e.g. "Banner_300x250.riv".';
+  }
+  if (msg.includes('Only .zip and .riv files')) {
+    return 'Unsupported file type. Only .zip and .riv files are accepted.';
+  }
+  if (msg.includes('No usable') || msg.includes('screenshot') || msg.includes('blank')) {
+    return 'The creative loaded but produced no usable backup image. Check that it renders correctly.';
+  }
+  if (msg.includes('File too large') || msg.includes('max 200 MB')) {
+    return 'File exceeds the 200 MB size limit.';
+  }
+  if (msg.includes('EACCES') || msg.includes('EPERM')) {
+    return 'A file permission error occurred. Check server directory permissions.';
+  }
+  if (msg.includes('ENOENT') || msg.includes('not found')) {
+    return 'A required file was missing during processing. The upload may be incomplete.';
+  }
+  return msg;
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (req, file, cb) => {
@@ -152,15 +182,18 @@ export async function startWebServer(port = 3001) {
       return res.status(400).json({ error: 'No files uploaded' });
     }
 
+    const fileInfos = files.map((f, index) => ({
+      id: createFileId(f.originalname, index),
+      name: f.originalname,
+      path: f.path,
+      type: /\.riv$/i.test(f.originalname) ? 'riv' : 'zip',
+      state: 'uploaded'
+    }));
+
     sessions.set(sessionId, {
       id: sessionId,
       createdAt: Date.now(),
-      files: files.map((f, index) => ({
-        id: createFileId(f.originalname, index),
-        name: f.originalname,
-        path: f.path,
-        type: /\.riv$/i.test(f.originalname) ? 'riv' : 'zip'
-      })),
+      files: fileInfos,
       status: 'uploaded',
       total: files.length,
       current: 0,
@@ -170,7 +203,11 @@ export async function startWebServer(port = 3001) {
       resultDir: null
     });
 
-    res.json({ sessionId, total: files.length });
+    res.json({
+      sessionId,
+      total: files.length,
+      files: fileInfos.map(f => ({ id: f.id, name: f.name, type: f.type, state: f.state }))
+    });
   });
 
   app.post('/api/process/:sessionId', async (req, res) => {
@@ -187,6 +224,10 @@ export async function startWebServer(port = 3001) {
     session.resultDir = path.join(TEMP_DIR, 'results', session.id);
     await fs.ensureDir(session.resultDir);
 
+    for (const f of session.files) {
+      f.state = 'queued';
+    }
+
     res.json({ sessionId: session.id, status: 'processing' });
 
     processSession(session);
@@ -200,6 +241,13 @@ export async function startWebServer(port = 3001) {
       status: session.status,
       current: session.current,
       total: session.total,
+      files: session.files.map(f => ({
+        id: f.id,
+        name: f.name,
+        type: f.type,
+        state: f.state,
+        error: f.error || null
+      })),
       errors: session.errors,
       results: session.results.length
     });
@@ -268,6 +316,8 @@ async function processSession(session) {
       let keepDir = false;
 
       try {
+        file.state = 'processing';
+
         if (file.type === 'riv') {
           const base = path.basename(file.name, '.riv');
           sanitized = sanitizeFileName(base);
@@ -295,6 +345,7 @@ async function processSession(session) {
           });
 
           keepDir = true;
+          file.state = 'complete';
           return { name: sanitized, type: 'riv', creativeDir };
         } else {
           const zipName = path.basename(file.name, '.zip');
@@ -311,10 +362,13 @@ async function processSession(session) {
           });
 
           keepDir = true;
+          file.state = 'complete';
           return { name: sanitized, type: 'zip', creativeDir: null };
         }
       } catch (err) {
-        session.errors.push({ file: file.name, error: err.message });
+        file.state = 'failed';
+        file.error = friendlyFileError(file.name, err.message);
+        session.errors.push({ file: file.name, error: err.message, friendly: file.error });
         return null;
       } finally {
         globalCap.release();
@@ -352,6 +406,16 @@ async function processSession(session) {
       }
     }
 
+    // Include errors.json when any file failed
+    if (session.errors.length > 0) {
+      const errorsJson = JSON.stringify(session.errors.map(e => ({
+        file: e.file,
+        error: e.error,
+        friendly: e.friendly || friendlyFileError(e.file, e.error)
+      })), null, 2);
+      zip.addFile('errors.json', Buffer.from(errorsJson, 'utf-8'));
+    }
+
     zip.writeZip(outputZip);
 
     session.outputZip = outputZip;
@@ -359,7 +423,7 @@ async function processSession(session) {
   } catch (err) {
     logger.error(`Failed to build output ZIP for session ${session.id}: ${err.message}`);
     session.status = 'error';
-    session.errors.push({ file: 'output', error: `Failed to build ZIP: ${err.message}` });
+    session.errors.push({ file: 'output', error: `Failed to build ZIP: ${err.message}`, friendly: 'Could not package the output files. Try again.' });
   } finally {
     await stopFileServer(fileServer);
   }
