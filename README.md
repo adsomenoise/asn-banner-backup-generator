@@ -298,6 +298,8 @@ Every error response follows this shape:
 | `UNSAFE_FILENAME` | Filename contains `..`, `/`, or `\` |
 | `UPLOAD_ERROR` | A generic upload error occurred |
 | `BAD_REQUEST` | A generic client error |
+| `UNAUTHORIZED` | Authentication credentials are missing or invalid (production mode) |
+| `FORBIDDEN` | The authenticated user is not permitted to access this resource |
 | `INTERNAL_ERROR` | An unexpected server error occurred |
 
 ---
@@ -358,6 +360,78 @@ If `window.riveInstance` is exposed with a `scrub` method, attempts to scrub to 
 
 Drains animation frames, detects canvas stability, then captures whatever is on screen.
 
+## Authentication
+
+All API endpoints (except `/api/v1/health`) require authentication when the server is started in production mode. Requests without valid credentials receive a `401` response.
+
+### Configuration
+
+```js
+// startWebServer accepts an optional auth config object
+await startWebServer(3001, {
+  auth: {
+    mode: 'production',             // 'development' | 'production'
+    headers: {
+      userId: 'x-user-id',         // default header names
+      tenantId: 'x-tenant-id',
+      clientId: 'x-client-id'
+    }
+  }
+});
+```
+
+### Adapters
+
+| Adapter | Mode | Description |
+|---------|------|-------------|
+| `HeaderAuthAdapter` | `production` | Extracts user/tenant/client identity from trusted HTTP headers set by the parent platform's proxy/ingress. Returns `null` if required headers are missing — the middleware then rejects with `401`. |
+| `DevAuthAdapter` | `development` (default) | Returns a configurable default identity (`dev-user` / `dev-tenant` / `dev-client`) when no auth headers are present. Also respects headers if provided, making integration testing easy. |
+
+### Identity & Ownership
+
+Every job is tagged with the authenticated identity at creation time:
+
+- `userId` — **required**. Uniquely identifies the actor. All subsequent operations on the job verify this matches.
+- `tenantId` — optional. Enables tenant isolation when set.
+- `clientId` — optional. Enables sub-account isolation when set.
+
+Access to a job requires a full match on all non-null identity fields:
+
+```
+userId  MATCH
+tenantId  MATCH  (if both job and request have it)
+clientId  MATCH  (if both job and request have it)
+```
+
+Mismatches return `404` (not `403`) to avoid leaking job existence across users or tenants.
+
+### Custom Adapter
+
+For non-header auth (session cookies, JWTs, platform SDKs), provide a custom adapter object:
+
+```js
+const myAdapter = {
+  extract(req) {
+    // Return { userId, tenantId?, clientId? } or null to reject
+    const token = req.headers['authorization'];
+    const payload = verifyMyToken(token);
+    return payload ? {
+      userId: payload.sub,
+      tenantId: payload.tenant,
+      clientId: payload.client
+    } : null;
+  }
+};
+
+await startWebServer(3001, {
+  auth: { mode: 'production', adapter: myAdapter }
+});
+```
+
+### Health Endpoint
+
+`GET /api/v1/health` is registered before the auth middleware and does not require authentication, even in production mode.
+
 ## Security & Production Notes
 
 ### ZIP Safety
@@ -406,7 +480,7 @@ npm test            # Run all tests
 npm run test:watch  # Re-run on file changes
 ```
 
-Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`.
+Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`.
 
 Tests cover:
 - ZIP path-traversal safety (`isPathSafe`)
@@ -427,6 +501,12 @@ rive-backup-generator/
 ├── temp/               # Extracted ZIPs, uploads, results (auto-managed, gitignored)
 ├── test/               # Automated tests
 ├── src/
+│   ├── auth/
+│   │   ├── adapter.js  # Auth adapters (HeaderAuth, DevAuth)
+│   │   └── middleware.js# Auth middleware factory
+│   ├── jobs/
+│   │   ├── Job.js      # Job + FileInfo model
+│   │   └── JobStore.js # JobStore interface + InMemoryJobStore
 │   ├── index.js        # CLI entry point
 │   ├── webServer.js    # Express web server
 │   ├── captureBackup.js# Playwright screenshot + Sharp compression

@@ -13,6 +13,9 @@ import { createServer as startFileServer, closeServer as stopFileServer } from '
 import { logger } from './logger.js';
 import { sanitizeFileName } from './utils.js';
 import { parseRivDimensions, generateRiveHTML } from './riveTemplate.js';
+import { createAuthMiddleware } from './auth/middleware.js';
+import { Job, FileInfo } from './jobs/Job.js';
+import { InMemoryJobStore } from './jobs/JobStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -49,7 +52,8 @@ class Semaphore {
 }
 
 const globalCap = new Semaphore(MAX_CONCURRENT);
-const sessions = new Map();
+
+const jobStore = new InMemoryJobStore();
 
 function newId() {
   return crypto.randomUUID().slice(0, 8);
@@ -69,12 +73,12 @@ function createFileId(fileName, index) {
   return `${String(index + 1).padStart(3, '0')}-${safeBase}`;
 }
 
-function getSessionWorkDir(session) {
-  return path.join(TEMP_DIR, 'work', session.id);
+function getJobWorkDir(job) {
+  return path.join(TEMP_DIR, 'work', job.id);
 }
 
-function getFileWorkDir(session, file) {
-  return path.join(getSessionWorkDir(session), file.id);
+function getFileWorkDir(job, file) {
+  return path.join(getJobWorkDir(job), file.id);
 }
 
 function getServedUrl(port, absolutePath) {
@@ -126,35 +130,16 @@ function errorBody(message, code) {
   return body;
 }
 
-function buildFileResponse(f) {
-  return {
-    fileId: f.id,
-    fileName: f.name,
-    fileType: f.type,
-    state: f.state,
-    error: f.error || null
-  };
-}
+// ---------------------------------------------------------------------------
+// Auth helpers
+// ---------------------------------------------------------------------------
 
-function buildProgress(session) {
-  const files = session.files || [];
-  return {
-    total: session.total,
-    completed: files.filter(f => f.state === 'complete').length,
-    failed: files.filter(f => f.state === 'failed').length,
-    results: session.results ? session.results.length : 0
-  };
-}
-
-function buildJobResponse(session) {
-  const progress = buildProgress(session);
-  return {
-    jobId: session.id,
-    status: session.status,
-    createdAt: new Date(session.createdAt).toISOString(),
-    files: session.files.map(buildFileResponse),
-    progress
-  };
+function assertOwnership(job, auth, res) {
+  if (!job || !job.isOwnedBy(auth)) {
+    res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,44 +174,50 @@ const upload = multer({
 });
 
 // ---------------------------------------------------------------------------
-// Session lifecycle
+// Job lifecycle — cleanup
 // ---------------------------------------------------------------------------
 
 function pruneStaleSessions() {
   const now = Date.now();
-  for (const [id, s] of sessions) {
-    if (s.status === 'processing') continue;
-    if (now - s.createdAt > SESSION_TTL_MS) {
-      rmdir(path.join(UPLOAD_DIR, id));
-      rmdir(s.resultDir);
-      rmdir(getSessionWorkDir(s));
-      sessions.delete(id);
+  jobStore.list().then(jobs => {
+    for (const s of jobs) {
+      if (s.status === 'processing') continue;
+      if (now - new Date(s.createdAt).getTime() > SESSION_TTL_MS) {
+        rmdir(path.join(UPLOAD_DIR, s.id));
+        rmdir(s.resultDir);
+        rmdir(getJobWorkDir(s));
+        jobStore.delete(s.id);
+      }
     }
-  }
+  });
 }
 
-async function processSession(session) {
+async function processJob(jobId) {
   let fileServer = null;
+
+  const job = await jobStore.get(jobId);
+  if (!job) return;
 
   try {
     fileServer = await startFileServer(3002, TEMP_DIR);
   } catch (err) {
-    session.status = 'error';
-    session.errors.push({ file: 'server', error: `Failed to start local file server: ${err.message}` });
+    job.setStatus('error');
+    job.errors.push({ file: 'server', error: `Failed to start local file server: ${err.message}` });
+    await jobStore.update(jobId, { status: job.status, errors: job.errors });
     return;
   }
 
   const port = fileServer.address().port;
 
   try {
-    const tasks = session.files.map(async (file) => {
+    const tasks = job.files.map(async (file) => {
       await globalCap.acquire();
-      const fileWorkDir = getFileWorkDir(session, file);
+      const fileWorkDir = getFileWorkDir(job, file);
       let sanitized = '';
       let keepDir = false;
 
       try {
-        file.state = 'processing';
+        file.setState('processing');
 
         if (file.type === 'riv') {
           const base = path.basename(file.name, '.riv');
@@ -249,13 +240,13 @@ async function processSession(session) {
 
           const url = getServedUrl(port, htmlFile);
 
-          await captureBackup(url, dims, session.resultDir, sanitized, {
+          await captureBackup(url, dims, job.resultDir, sanitized, {
             waitTimeout: 15000,
             strategy: 'auto'
           });
 
           keepDir = true;
-          file.state = 'complete';
+          file.setState('complete');
           return { name: sanitized, type: 'riv', creativeDir };
         } else {
           const zipName = path.basename(file.name, '.zip');
@@ -266,19 +257,18 @@ async function processSession(session) {
 
           const url = getServedUrl(port, entry);
 
-          await captureBackup(url, dimensions, session.resultDir, sanitized, {
+          await captureBackup(url, dimensions, job.resultDir, sanitized, {
             waitTimeout: 15000,
             strategy: 'auto'
           });
 
           keepDir = true;
-          file.state = 'complete';
+          file.setState('complete');
           return { name: sanitized, type: 'zip', creativeDir: null };
         }
       } catch (err) {
-        file.state = 'failed';
-        file.error = friendlyFileError(file.name, err.message);
-        session.errors.push({ file: file.name, error: err.message, friendly: file.error });
+        file.setState('failed', friendlyFileError(file.name, err.message));
+        job.errors.push({ file: file.name, error: err.message, friendly: file.error });
         return null;
       } finally {
         globalCap.release();
@@ -286,19 +276,18 @@ async function processSession(session) {
         if (!keepDir) {
           await rmdir(fileWorkDir);
         }
-        session.current++;
       }
     });
 
     const results = (await Promise.all(tasks)).filter(Boolean);
-    session.results.push(...results);
+    job.results.push(...results);
 
-    const outputZip = path.join(TEMP_DIR, 'results', `${session.id}.zip`);
+    const outputZip = path.join(TEMP_DIR, 'results', `${job.id}.zip`);
     const zip = new AdmZip();
 
-    for (const result of session.results) {
+    for (const result of job.results) {
       if (result.type === 'riv' && result.creativeDir) {
-        const nestedZipPath = path.join(session.resultDir, `${result.name}.zip`);
+        const nestedZipPath = path.join(job.resultDir, `${result.name}.zip`);
         const nestedZip = new AdmZip();
         const creativeFiles = await fs.readdir(result.creativeDir).catch(() => []);
         for (const f of creativeFiles) {
@@ -310,15 +299,14 @@ async function processSession(session) {
         zip.addLocalFile(nestedZipPath, '', `${result.name}.zip`);
       }
 
-      const jpgPath = path.join(session.resultDir, `${result.name}.jpg`);
+      const jpgPath = path.join(job.resultDir, `${result.name}.jpg`);
       if (await fs.pathExists(jpgPath)) {
         zip.addLocalFile(jpgPath, '', `${result.name}.jpg`);
       }
     }
 
-    // Include errors.json when any file failed
-    if (session.errors.length > 0) {
-      const errorsJson = JSON.stringify(session.errors.map(e => ({
+    if (job.errors.length > 0) {
+      const errorsJson = JSON.stringify(job.errors.map(e => ({
         file: e.file,
         error: e.error,
         friendly: e.friendly || friendlyFileError(e.file, e.error)
@@ -328,43 +316,53 @@ async function processSession(session) {
 
     zip.writeZip(outputZip);
 
-    session.outputZip = outputZip;
-    session.status = 'complete';
+    job.outputZip = outputZip;
+    job.setStatus('complete');
+    await jobStore.update(jobId, {
+      status: job.status,
+      updatedAt: job.updatedAt,
+      outputZip: job.outputZip,
+      files: job.files,
+      errors: job.errors,
+      results: job.results
+    });
   } catch (err) {
-    logger.error(`Failed to build output ZIP for session ${session.id}: ${err.message}`);
-    session.status = 'error';
-    session.errors.push({ file: 'output', error: `Failed to build ZIP: ${err.message}`, friendly: 'Could not package the output files. Try again.' });
+    logger.error(`Failed to build output ZIP for job ${job.id}: ${err.message}`);
+    job.setStatus('error');
+    job.errors.push({ file: 'output', error: `Failed to build ZIP: ${err.message}`, friendly: 'Could not package the output files. Try again.' });
+    await jobStore.update(jobId, { status: job.status, errors: job.errors });
   } finally {
     await stopFileServer(fileServer);
   }
 }
 
-async function cleanupSession(session) {
-  await rmdir(session.outputZip).catch(() => {});
-  await rmdir(session.resultDir).catch(() => {});
-  for (const result of session.results) {
+async function cleanupJob(job) {
+  await rmdir(job.outputZip).catch(() => {});
+  await rmdir(job.resultDir).catch(() => {});
+  for (const result of job.results) {
     if (result.type === 'riv' && result.creativeDir) {
       await rmdir(result.creativeDir).catch(() => {});
     }
   }
-  await rmdir(getSessionWorkDir(session)).catch(() => {});
-  await rmdir(path.join(UPLOAD_DIR, session.id)).catch(() => {});
-  sessions.delete(session.id);
+  await rmdir(getJobWorkDir(job)).catch(() => {});
+  await rmdir(path.join(UPLOAD_DIR, job.id)).catch(() => {});
+  await jobStore.delete(job.id);
 }
 
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
 
-function handleUpload(req, res) {
-  const sessionId = req.sessionId;
+async function handleUpload(req, res) {
   const files = req.files || [];
 
   if (files.length === 0) {
     return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
   }
 
-  const fileInfos = files.map((f, index) => ({
+  const auth = req.auth || {};
+
+  const fileInfos = files.map((f, index) => new FileInfo({
     id: createFileId(f.originalname, index),
     name: f.originalname,
     path: f.path,
@@ -372,82 +370,89 @@ function handleUpload(req, res) {
     state: 'uploaded'
   }));
 
-  const session = {
-    id: sessionId,
-    createdAt: Date.now(),
-    files: fileInfos,
-    status: 'uploaded',
-    total: files.length,
-    current: 0,
-    results: [],
-    errors: [],
-    outputZip: null,
-    resultDir: null
-  };
+  const job = new Job({
+    id: req.sessionId,
+    userId: auth.userId || null,
+    tenantId: auth.tenantId || null,
+    clientId: auth.clientId || null,
+    files: fileInfos
+  });
 
-  sessions.set(sessionId, session);
+  await jobStore.create(job);
 
-  res.status(201).json(buildJobResponse(session));
+  const response = job.toJSON();
+  res.status(201).json(response);
 }
 
-function handleStartProcessing(req, res) {
-  const session = sessions.get(req.params.jobId);
-  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
-  if (session.status === 'processing') {
+async function handleStartProcessing(req, res) {
+  const job = await jobStore.get(req.params.jobId);
+  if (!assertOwnership(job, req.auth, res)) return;
+
+  if (job.status === 'processing') {
     return res.status(409).json(errorBody('Job is already processing', 'ALREADY_PROCESSING'));
   }
 
-  session.status = 'processing';
-  session.current = 0;
-  session.results = [];
-  session.errors = [];
-  session.resultDir = path.join(TEMP_DIR, 'results', session.id);
-  fs.ensureDirSync(session.resultDir);
+  job.setStatus('processing');
+  job.results = [];
+  job.errors = [];
+  job.resultDir = path.join(TEMP_DIR, 'results', job.id);
+  await fs.ensureDir(job.resultDir);
 
-  for (const f of session.files) {
-    f.state = 'queued';
+  for (const f of job.files) {
+    f.setState('queued');
   }
 
-  res.json(buildJobResponse(session));
+  await jobStore.update(job.id, {
+    status: job.status,
+    updatedAt: job.updatedAt,
+    results: job.results,
+    errors: job.errors,
+    resultDir: job.resultDir,
+    files: job.files
+  });
 
-  processSession(session);
+  const response = job.toJSON();
+  res.json(response);
+
+  processJob(job.id);
 }
 
-function handleGetJob(req, res) {
-  const session = sessions.get(req.params.jobId);
-  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+async function handleGetJob(req, res) {
+  const job = await jobStore.get(req.params.jobId);
+  if (!assertOwnership(job, req.auth, res)) return;
 
-  const response = buildJobResponse(session);
-  if (session.status === 'complete') {
-    response.download = `/api/v1/jobs/${session.id}/download`;
+  const response = job.toJSON();
+  if (job.status === 'complete') {
+    response.download = `/api/v1/jobs/${job.id}/download`;
   }
   res.json(response);
 }
 
-function handleGetJobFiles(req, res) {
-  const session = sessions.get(req.params.jobId);
-  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+async function handleGetJobFiles(req, res) {
+  const job = await jobStore.get(req.params.jobId);
+  if (!assertOwnership(job, req.auth, res)) return;
 
   res.json({
-    jobId: session.id,
-    files: session.files.map(buildFileResponse)
+    jobId: job.id,
+    files: job.files.map(f => f.toJSON())
   });
 }
 
 async function handleDownload(req, res) {
-  const session = sessions.get(req.params.jobId);
-  if (!session) return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
-  if (session.status !== 'complete') {
+  const job = await jobStore.get(req.params.jobId);
+  if (!assertOwnership(job, req.auth, res)) return;
+
+  if (job.status !== 'complete') {
     return res.status(400).json(errorBody('Job is not complete yet', 'NOT_COMPLETE'));
   }
 
-  const zipPath = session.outputZip;
+  const zipPath = job.outputZip;
   if (!zipPath || !(await fs.pathExists(zipPath))) {
     return res.status(404).json(errorBody('Result file not found', 'RESULT_NOT_FOUND'));
   }
 
-  res.download(zipPath, `backup-images-${session.id}.zip`, async () => {
-    await cleanupSession(session);
+  res.download(zipPath, `backup-images-${job.id}.zip`, async () => {
+    await cleanupJob(job);
   });
 }
 
@@ -456,7 +461,8 @@ function handleHealth(req, res) {
     status: 'ok',
     timestamp: new Date().toISOString(),
     version: APP_VERSION,
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    jobs: jobStore.size
   });
 }
 
@@ -486,7 +492,7 @@ function handleMulterError(err, req, res, next) {
 // Server bootstrap
 // ---------------------------------------------------------------------------
 
-export async function startWebServer(port = 3001) {
+export async function startWebServer(port = 3001, { auth } = {}) {
   const app = express();
 
   await fs.ensureDir(UPLOAD_DIR);
@@ -504,12 +510,21 @@ export async function startWebServer(port = 3001) {
   app.use(express.static(path.join(__dirname, 'public')));
 
   // -----------------------------------------------------------------------
+  // Auth middleware — applies to all /api/* routes
+  // -----------------------------------------------------------------------
+
+  const authMw = createAuthMiddleware(auth || {});
+
+  // Health endpoint is public (registered before auth middleware)
+  app.get('/api/v1/health', handleHealth);
+
+  app.use('/api', authMw);
+
+  // -----------------------------------------------------------------------
   // v1 API router
   // -----------------------------------------------------------------------
 
   const v1 = express.Router();
-
-  v1.get('/health', handleHealth);
 
   v1.post('/jobs', (req, res, next) => {
     req.sessionId = newId();
