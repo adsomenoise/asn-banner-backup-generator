@@ -35,6 +35,51 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 
 const APP_VERSION = '1.0.0';
 
+function parseNumberEnv(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function parsePortValue(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function boolEnv(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseHeaderMapEnv(env = process.env) {
+  const useAuthPrefix = boolEnv(env.AUTH_HEADERS_USE_AUTH_PREFIX, true);
+  return {
+    userId: env.AUTH_USER_ID_HEADER || (useAuthPrefix ? 'x-auth-user-id' : 'x-user-id'),
+    tenantId: env.AUTH_TENANT_ID_HEADER || (useAuthPrefix ? 'x-auth-tenant-id' : 'x-tenant-id'),
+    clientId: env.AUTH_CLIENT_ID_HEADER || (useAuthPrefix ? 'x-auth-client-id' : 'x-client-id')
+  };
+}
+
+function envDefaults(env = process.env) {
+  const nodeEnv = env.NODE_ENV || 'development';
+  const isProd = nodeEnv === 'production';
+  return {
+    port: parseNumberEnv(env.PORT, 3001),
+    corsOrigin: env.CORS_ORIGIN || '*',
+    rateLimitMax: parseNumberEnv(env.RATE_LIMIT_MAX, 30),
+    auth: {
+      mode: env.AUTH_MODE || (isProd ? 'production' : 'development'),
+      headers: parseHeaderMapEnv(env)
+    }
+  };
+}
+
 class Semaphore {
   constructor(max) {
     this.max = max;
@@ -660,8 +705,18 @@ export async function startWebServer(port = 3001, opts = {}) {
   const app = express();
   const log = logger.child({ module: 'webServer' });
 
-  const corsOrigin = opts.corsOrigin || '*';
-  const rateLimitMax = opts.rateLimitMax || 30;
+  const defaults = envDefaults();
+  const resolvedPort = parsePortValue(port, defaults.port);
+  const corsOrigin = opts.corsOrigin || defaults.corsOrigin;
+  const rateLimitMax = opts.rateLimitMax || defaults.rateLimitMax;
+  const authOptions = {
+    ...defaults.auth,
+    ...(opts.auth || {}),
+    headers: {
+      ...defaults.auth.headers,
+      ...((opts.auth && opts.auth.headers) || {})
+    }
+  };
 
   await fs.ensureDir(storage.root);
 
@@ -728,7 +783,7 @@ export async function startWebServer(port = 3001, opts = {}) {
   // Auth middleware — applies to all /api/* routes
   // -----------------------------------------------------------------------
 
-  const authMw = createAuthMiddleware(opts.auth || {});
+  const authMw = createAuthMiddleware(authOptions);
 
   // Health endpoint is public (registered before auth middleware)
   app.get('/api/v1/health', handleHealth);
@@ -787,8 +842,9 @@ export async function startWebServer(port = 3001, opts = {}) {
   app.use(handleMulterError);
 
   return new Promise((resolve, reject) => {
-    const server = app.listen(port, '0.0.0.0', () => {
-      log.stepSuccess(`Web interface at http://localhost:${port}`);
+    const server = app.listen(resolvedPort, '0.0.0.0', () => {
+      const boundPort = server.address().port;
+      log.stepSuccess(`Web interface at http://localhost:${boundPort}`);
       resolve(server);
     });
     server.on('error', reject);
@@ -796,5 +852,6 @@ export async function startWebServer(port = 3001, opts = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  startWebServer(parseInt(process.argv[2], 10) || 3001);
+  const argPort = parseInt(process.argv[2], 10);
+  startWebServer(Number.isFinite(argPort) ? argPort : undefined);
 }

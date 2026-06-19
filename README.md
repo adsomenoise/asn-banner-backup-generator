@@ -9,6 +9,37 @@ npm install
 npx playwright install chromium
 ```
 
+## Quality Gates
+
+```bash
+npm run lint
+npm test
+```
+
+CI runs the same checks on push and pull requests via [.github/workflows/ci.yml](.github/workflows/ci.yml).
+
+For production deploy safety checks:
+
+```bash
+npm run preflight
+```
+
+See the full release/deploy checklist in [docs/release-runbook.md](docs/release-runbook.md).
+
+## Production Environment
+
+Create your runtime environment file from [.env.example](.env.example) and set the values for your deployment target.
+
+Key variables:
+
+- `NODE_ENV` (`production` for deployed environments)
+- `PORT` (web server bind port)
+- `CORS_ORIGIN` (frontend origin or `*`)
+- `RATE_LIMIT_MAX` (requests per minute per IP for mutation endpoints)
+- `CAPTURE_CONCURRENCY` (1-8, defaults to 3)
+- `AUTH_MODE` (`development` or `production`)
+- `AUTH_USER_ID_HEADER`, `AUTH_TENANT_ID_HEADER`, `AUTH_CLIENT_ID_HEADER` (identity headers expected from your gateway)
+
 ## Usage — CLI
 
 1. Place banner ZIP files in the `input/` directory

@@ -1,0 +1,82 @@
+function parsePositiveInt(name, value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return `${name} must be a positive integer`;
+  }
+  return null;
+}
+
+function parseCaptureConcurrency(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) {
+    return 'CAPTURE_CONCURRENCY must be an integer between 1 and 8';
+  }
+  return null;
+}
+
+function checkProductionEnv(env = process.env) {
+  const errors = [];
+  const warnings = [];
+
+  const nodeEnv = env.NODE_ENV || 'development';
+  const isProduction = nodeEnv === 'production';
+
+  if (!isProduction) {
+    warnings.push('NODE_ENV is not production; strict production preflight checks were skipped.');
+    return { errors, warnings };
+  }
+
+  const requiredVars = [
+    'CORS_ORIGIN',
+    'AUTH_MODE',
+    'AUTH_USER_ID_HEADER',
+    'AUTH_TENANT_ID_HEADER',
+    'AUTH_CLIENT_ID_HEADER'
+  ];
+
+  for (const varName of requiredVars) {
+    if (!env[varName] || String(env[varName]).trim() === '') {
+      errors.push(`${varName} is required when NODE_ENV=production`);
+    }
+  }
+
+  if (env.AUTH_MODE && env.AUTH_MODE !== 'production') {
+    errors.push('AUTH_MODE must be set to production when NODE_ENV=production');
+  }
+
+  if (env.CORS_ORIGIN === '*') {
+    errors.push('CORS_ORIGIN must not be * in production');
+  }
+
+  const portError = parsePositiveInt('PORT', env.PORT || '3001');
+  if (portError) errors.push(portError);
+
+  const rateLimitError = parsePositiveInt('RATE_LIMIT_MAX', env.RATE_LIMIT_MAX || '30');
+  if (rateLimitError) errors.push(rateLimitError);
+
+  const concurrencyError = parseCaptureConcurrency(env.CAPTURE_CONCURRENCY);
+  if (concurrencyError) errors.push(concurrencyError);
+
+  return { errors, warnings };
+}
+
+function main() {
+  const { errors, warnings } = checkProductionEnv(process.env);
+
+  for (const warning of warnings) {
+    console.warn(`[preflight] WARN: ${warning}`);
+  }
+
+  if (errors.length > 0) {
+    console.error('[preflight] FAILED');
+    for (const error of errors) {
+      console.error(`[preflight] ERROR: ${error}`);
+    }
+    process.exit(1);
+  }
+
+  console.log('[preflight] OK');
+}
+
+main();
