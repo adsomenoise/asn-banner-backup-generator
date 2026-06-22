@@ -27,9 +27,9 @@
     <div class="drop-zone-text">
       <strong>Choose files</strong> or drag them here
     </div>
-    <div class="drop-zone-hint">ZIP or .riv &middot; multiple allowed</div>
+    <div class="drop-zone-hint">ZIP, .riv, or video &middot; multiple allowed</div>
   </div>
-  <input type="file" id="fileInput" multiple accept=".zip,.riv" hidden aria-hidden="true">
+   <input type="file" id="fileInput" multiple accept=".zip,.riv,.mp4,.webm,.mov,.avi,.mkv,.flv,.wmv" hidden aria-hidden="true">
 
   <div class="file-list" id="fileList" role="list" aria-label="Uploaded files"></div>
 
@@ -39,9 +39,9 @@
     <div class="actions-col">
       <div class="actions-row">
         <button class="btn btn-primary" id="processBtn" disabled>Generate backups</button>
-        <button class="btn btn-success" id="downloadBtn" style="display:none">Download ZIP</button>
-        <button class="btn btn-retry" id="retryBtn" style="display:none">Retry failed</button>
-        <button class="btn btn-secondary" id="resetBtn" style="display:none">Start over</button>
+        <button class="btn btn-success hidden" id="downloadBtn">Download ZIP</button>
+        <button class="btn btn-retry hidden" id="retryBtn">Retry failed</button>
+        <button class="btn btn-secondary hidden" id="resetBtn">Start over</button>
       </div>
     </div>
   </div>
@@ -136,8 +136,8 @@ fileInput.addEventListener('change', () => handleFiles(fileInput.files));
 // ---------------------------------------------------------------------------
 
 const ERROR_HELP = {
-  NO_FILES: 'Select at least one .zip or .riv file.',
-  INVALID_FILE_TYPE: 'Only .zip (banner HTML creatives) and .riv (Rive animation) files are accepted.',
+  NO_FILES: 'Select at least one .zip, .riv, or video file.',
+  INVALID_FILE_TYPE: 'Only .zip, .riv, and video files (.mp4, .webm, .mov) are accepted.',
   UNSAFE_FILENAME: 'The file name contains invalid characters. Rename it and try again.',
   FILE_TOO_LARGE: 'The file exceeds the 200 MB size limit. Compress or split it.',
   RATE_LIMITED: 'Too many requests. Wait a moment and try again.',
@@ -161,6 +161,7 @@ const ERROR_LABELS = {
   CREATIVE_LOAD_FAILURE: 'Load failure',
   BLANK_CANVAS: 'Blank canvas',
   EXTRACTION_ERROR: 'Extraction error',
+  VIDEO_PROCESSING_ERROR: 'Video error',
   UNKNOWN: 'Error',
 };
 
@@ -173,9 +174,9 @@ function friendlyErrorLabel(code) {
 // ---------------------------------------------------------------------------
 
 function handleFiles(files) {
-  const newFiles = Array.from(files).filter(f => /\.(zip|riv)$/i.test(f.name));
+  const newFiles = Array.from(files).filter(f => /\.(zip|riv|mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(f.name));
   if (newFiles.length === 0) {
-    showToast('Only .zip and .riv files are supported.', 'warn');
+    showToast('Only .zip, .riv, and video files are supported.', 'warn');
     return;
   }
 
@@ -355,9 +356,9 @@ async function startProcessing() {
   if (!sessionId) return;
 
   processBtn.disabled = true;
-  downloadBtn.style.display = 'none';
-  retryBtn.style.display = 'none';
-  resetBtn.style.display = 'none';
+  downloadBtn.classList.add('hidden');
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
   hideErrorSummary();
   overlay.classList.add('visible');
   startWaitingText();
@@ -391,9 +392,9 @@ async function startRetry() {
   if (!sessionId) return;
 
   processBtn.disabled = true;
-  downloadBtn.style.display = 'none';
-  retryBtn.style.display = 'none';
-  resetBtn.style.display = 'none';
+  downloadBtn.classList.add('hidden');
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
   hideErrorSummary();
   overlay.classList.add('visible');
   startWaitingText();
@@ -414,9 +415,9 @@ async function startRetry() {
     // Re-enable appropriate buttons based on previous state
     const hasSuccess = sessionFiles.some(f => f.state === 'complete');
     const hasFailures = sessionFiles.some(f => f.state === 'failed');
-    if (hasSuccess) downloadBtn.style.display = 'block';
-    if (hasFailures) retryBtn.style.display = 'block';
-    resetBtn.style.display = 'block';
+    if (hasSuccess) downloadBtn.classList.remove('hidden');
+    if (hasFailures) retryBtn.classList.remove('hidden');
+    resetBtn.classList.remove('hidden');
     processBtn.disabled = false;
     return;
   }
@@ -476,14 +477,17 @@ async function pollStatus() {
           progressText.textContent = `Complete — ${successCount} image(s) generated`;
         }
 
+        processBtn.classList.add('hidden');
+
         if (successCount > 0) {
-          downloadBtn.style.display = 'block';
+          downloadBtn.classList.remove('hidden');
           downloadBtn.focus();
         }
         if (failCount > 0 && data.canRetry) {
-          retryBtn.style.display = 'block';
+          retryBtn.classList.remove('hidden');
+          retryBtn.textContent = `Retry failed (${failCount})`;
         }
-        resetBtn.style.display = 'block';
+        resetBtn.classList.remove('hidden');
         polling = false;
         return;
       }
@@ -494,7 +498,7 @@ async function pollStatus() {
         stopWaitingText();
         progressText.textContent = 'Processing failed';
         showErrorSummary('An unexpected error occurred during processing.');
-        resetBtn.style.display = 'block';
+        resetBtn.classList.remove('hidden');
         polling = false;
         return;
       }
@@ -510,45 +514,40 @@ async function pollStatus() {
 
 downloadBtn.addEventListener('click', startDownload);
 
-function startDownload() {
+async function startDownload() {
   if (!sessionId) return;
 
   downloadBtn.disabled = true;
   downloadBtn.textContent = 'Downloading...';
 
-  // Use a hidden iframe to trigger download without navigation
-  const iframe = document.createElement('iframe');
-  iframe.style.display = 'none';
-  iframe.src = `/api/v1/jobs/${sessionId}/download`;
-  document.body.appendChild(iframe);
+  try {
+    const res = await fetch(`/api/v1/jobs/${sessionId}/download`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Download failed' }));
+      showToast(err.error || 'Download failed', 'error');
+      downloadBtn.textContent = 'Download ZIP';
+      downloadBtn.disabled = false;
+      return;
+    }
 
-  // Poll for the download cookie / track completion via progress
-  const checkComplete = setInterval(() => {
-    fetch(`/api/v1/jobs/${sessionId}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.status === 'complete') {
-          // Job still exists → download hasn't triggered cleanup yet
-        } else {
-          // Job was cleaned up (404 or deleted)
-          clearInterval(checkComplete);
-          setTimeout(() => {
-            downloadBtn.textContent = 'Download ZIP';
-            downloadBtn.disabled = false;
-            resetUI();
-          }, 1000);
-        }
-      })
-      .catch(() => {
-        // 404 means job was cleaned up
-        clearInterval(checkComplete);
-        setTimeout(() => {
-          downloadBtn.textContent = 'Download ZIP';
-          downloadBtn.disabled = false;
-          resetUI();
-        }, 1000);
-      });
-  }, 2000);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backup-images-${sessionId}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    showToast('Download started', 'success');
+    await new Promise(r => setTimeout(r, 1500));
+    resetUI();
+  } catch (err) {
+    showToast('Download failed: network error', 'error');
+    downloadBtn.textContent = 'Download ZIP';
+    downloadBtn.disabled = false;
+  }
 }
 
 resetBtn.addEventListener('click', resetUI);
@@ -559,12 +558,13 @@ function resetUI() {
   completed = false;
   fileList.classList.remove('visible');
   fileList.innerHTML = '';
+  processBtn.classList.remove('hidden');
   processBtn.disabled = true;
-  downloadBtn.style.display = 'none';
+  downloadBtn.classList.add('hidden');
   downloadBtn.disabled = false;
   downloadBtn.textContent = 'Download ZIP';
-  retryBtn.style.display = 'none';
-  resetBtn.style.display = 'none';
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
   progressWrap.classList.remove('visible');
   hideErrorSummary();
 }

@@ -5,3 +5,4 @@ input/*.zip
 .DS_Store
 *.log
 test-temp-*
+debug-artifacts-*

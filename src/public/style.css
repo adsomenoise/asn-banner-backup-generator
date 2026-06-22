@@ -19,6 +19,8 @@
   --badge-zip-text: #93c5fd;
   --badge-riv-bg: #3b1f4e;
   --badge-riv-text: #c4b5fd;
+  --badge-video-bg: #1f3b2e;
+  --badge-video-text: #a7f3d0;
   --progress-bg: #2a2a2a;
   --errors-bg: #2d1515;
   --errors-border: #4a1a1a;
@@ -52,6 +54,8 @@
     --badge-zip-text: #1e40af;
     --badge-riv-bg: #ede9fe;
     --badge-riv-text: #5b21b6;
+    --badge-video-bg: #d1fae5;
+    --badge-video-text: #065f46;
     --progress-bg: #e5e7eb;
     --errors-bg: #fef2f2;
     --errors-border: #fecaca;
@@ -129,6 +133,7 @@ body {
 }
 .file-type-badge.zip { background: var(--badge-zip-bg); color: var(--badge-zip-text); }
 .file-type-badge.riv { background: var(--badge-riv-bg); color: var(--badge-riv-text); }
+.file-type-badge.video { background: var(--badge-video-bg); color: var(--badge-video-text); }
 .file-name {
   font-size: 0.875rem; font-weight: 500; color: var(--text-name);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -220,6 +225,7 @@ body {
   background: var(--state-failed); color: #fff;
 }
 .btn-retry:hover:not(:disabled) { background: #dc2626; }
+.hidden { display: none !important; }
 
 /* Progress */
 .progress-wrap { margin-top: 1rem; display: none; }

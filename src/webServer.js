@@ -9,6 +9,7 @@ import { extractZip } from './extractZip.js';
 import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
 import { captureBackup } from './captureBackup.js';
+import { captureVideoFrame, isVideoFile } from './captureVideo.js';
 import { createServer as startFileServer, closeServer as stopFileServer } from './localServer.js';
 import { logger } from './logger.js';
 import { metrics } from './metrics.js';
@@ -140,8 +141,8 @@ function friendlyFileError(fileName, rawMessage) {
   if (msg.includes('Could not parse dimensions')) {
     return 'The .riv filename must include dimensions, e.g. "Banner_300x250.riv".';
   }
-  if (msg.includes('Only .zip and .riv files')) {
-    return 'Unsupported file type. Only .zip and .riv files are accepted.';
+  if (msg.includes('Only .zip, .riv, and video files')) {
+    return 'Unsupported file type. Only .zip, .riv, and video files (.mp4, .webm, .mov) are accepted.';
   }
   if (msg.includes('No usable') || msg.includes('screenshot') || msg.includes('blank')) {
     return 'The creative loaded but produced no usable backup image. Check that it renders correctly.';
@@ -154,6 +155,9 @@ function friendlyFileError(fileName, rawMessage) {
   }
   if (msg.includes('ENOENT') || msg.includes('not found')) {
     return 'A required file was missing during processing. The upload may be incomplete.';
+  }
+  if (msg.includes('ffmpeg') || msg.includes('ffprobe') || msg.includes('video')) {
+    return 'The video file could not be processed. Ensure it is a valid video format and ffmpeg is installed.';
   }
   return msg;
 }
@@ -204,8 +208,8 @@ const upload = multer({
     files: MAX_UPLOAD_FILES
   },
   fileFilter: (req, file, cb) => {
-    if (!/\.(zip|riv)$/i.test(file.originalname)) {
-      return cb(new Error('Only .zip and .riv files allowed'));
+    if (!/\.(zip|riv|mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(file.originalname)) {
+      return cb(new Error('Only .zip, .riv, and video files allowed'));
     }
     cb(null, true);
   }
@@ -303,6 +307,18 @@ async function processJob(jobId) {
           metrics.increment('file.complete', { type: 'riv' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
           return { name: sanitized, type: 'riv', creativeDir };
+        } else if (file.type === 'video') {
+          const videoName = path.basename(file.name);
+          sanitized = sanitizeFileName(path.parse(videoName).name);
+
+          fileLog.info('Capturing video last frame');
+          const result = await captureVideoFrame(file.path, job.resultDir, sanitized);
+
+          file.setState('complete');
+          await jobStore.update(jobId, { files: job.files });
+          metrics.increment('file.complete', { type: 'video' });
+          fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
+          return { name: sanitized, type: 'video', creativeDir: null };
         } else {
           const zipName = path.basename(file.name, '.zip');
           sanitized = sanitizeFileName(zipName);
@@ -419,6 +435,7 @@ function classifyError(msg) {
   if (msg.includes('Failed to load creative') || msg.includes('HTTP ')) return 'creative_load_failure';
   if (msg.includes('No usable') || msg.includes('blank')) return 'blank_canvas';
   if (msg.includes('extract')) return 'extraction_error';
+  if (msg.includes('ffmpeg') || msg.includes('ffprobe') || msg.includes('video')) return 'video_processing_error';
   return 'unknown';
 }
 
@@ -468,7 +485,7 @@ async function handleUpload(req, res) {
     id: createFileId(f.originalname, index),
     name: f.originalname,
     path: f.path,
-    type: /\.riv$/i.test(f.originalname) ? 'riv' : 'zip',
+    type: /\.riv$/i.test(f.originalname) ? 'riv' : isVideoFile(f.originalname) ? 'video' : 'zip',
     state: 'uploaded'
   }));
 
@@ -671,7 +688,7 @@ function handleMulterError(err, req, res, next) {
     return res.status(400).json(errorBody(err.message, 'UPLOAD_ERROR'));
   }
   if (err.message) {
-    if (err.message === 'Only .zip and .riv files allowed') {
+    if (err.message === 'Only .zip, .riv, and video files allowed') {
       metrics.increment('upload.rejected', { reason: 'invalid_type' });
       return res.status(400).json(errorBody(err.message, 'INVALID_FILE_TYPE'));
     }
@@ -732,6 +749,7 @@ export async function startWebServer(port = 3001, opts = {}) {
     res.setHeader('X-XSS-Protection', '0');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none';");
     next();
   });
 
