@@ -27,26 +27,25 @@ function checkProductionEnv(env = process.env) {
     return { errors, warnings };
   }
 
-  const requiredVars = [
-    'CORS_ORIGIN',
-    'AUTH_MODE',
-    'AUTH_USER_ID_HEADER',
-    'AUTH_TENANT_ID_HEADER',
-    'AUTH_CLIENT_ID_HEADER'
-  ];
-
-  for (const varName of requiredVars) {
-    if (!env[varName] || String(env[varName]).trim() === '') {
-      errors.push(`${varName} is required when NODE_ENV=production`);
-    }
-  }
-
-  if (env.AUTH_MODE && env.AUTH_MODE !== 'production') {
-    errors.push('AUTH_MODE must be set to production when NODE_ENV=production');
+  if (!env.CORS_ORIGIN || String(env.CORS_ORIGIN).trim() === '') {
+    errors.push('CORS_ORIGIN is required when NODE_ENV=production');
   }
 
   if (env.CORS_ORIGIN === '*') {
     errors.push('CORS_ORIGIN must not be * in production');
+  }
+
+  const authMode = env.AUTH_MODE || 'production';
+
+  if (authMode === 'production') {
+    const prodHeaders = ['AUTH_USER_ID_HEADER', 'AUTH_TENANT_ID_HEADER', 'AUTH_CLIENT_ID_HEADER'];
+    for (const varName of prodHeaders) {
+      if (!env[varName] || String(env[varName]).trim() === '') {
+        errors.push(`${varName} is required when AUTH_MODE=production`);
+      }
+    }
+  } else {
+    warnings.push(`AUTH_MODE is "${authMode}" — authentication is disabled. Set AUTH_MODE=production with a reverse proxy to enable it.`);
   }
 
   const portError = parsePositiveInt('PORT', env.PORT || '3001');

@@ -6,7 +6,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3001"
-      CORS_ORIGIN: "https://bbg.bannerama.be"
+      CORS_ORIGIN: "https://bbg.mrwolf.be"
       AUTH_MODE: production
       AUTH_USER_ID_HEADER: x-auth-user-id
       AUTH_TENANT_ID_HEADER: x-auth-tenant-id
