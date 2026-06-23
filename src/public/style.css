@@ -279,6 +279,31 @@ body {
 .overlay-file .file-label {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0,0,0,0); border: 0;
 }
+
+/* Login overlay */
+.login-overlay {
+  position: fixed; inset: 0; z-index: 3000;
+  display: none; align-items: center; justify-content: center;
+  background: var(--bg);
+}
+.login-box {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 16px; padding: 40px; width: 100%; max-width: 400px;
+  text-align: center;
+}
+.login-box h2 { margin: 0 0 4px; font-size: 1.25rem; color: var(--text-heading); }
+.login-desc { margin: 0 0 24px; font-size: 0.875rem; color: var(--text-muted); }
+.login-box label { display: block; text-align: left; font-size: 0.8125rem; font-weight: 500; color: var(--text-soft); margin-bottom: 4px; }
+.login-box input {
+  display: block; width: 100%; padding: 10px 12px; margin-bottom: 16px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font-size: 0.875rem; box-sizing: border-box;
+}
+.login-box input:focus { outline: none; border-color: var(--accent); }
+.login-box .btn { width: 100%; margin-top: 4px; }
+.login-error { margin-top: 12px; font-size: 0.8125rem; color: var(--state-failed); display: none; }
+.login-error.visible { display: block; }

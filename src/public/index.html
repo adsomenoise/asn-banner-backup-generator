@@ -12,6 +12,21 @@
 </head>
 <body>
 <div class="container" role="main">
+  <div class="login-overlay" id="loginOverlay" role="dialog" aria-modal="true" aria-label="Login">
+    <div class="login-box">
+      <h2>Banner Backup Generator</h2>
+      <p class="login-desc">Sign in to continue</p>
+      <form id="loginForm" onsubmit="return handleLogin(event)">
+        <label for="loginUsername">Username</label>
+        <input type="text" id="loginUsername" name="username" autocomplete="username" required>
+        <label for="loginPassword">Password</label>
+        <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
+        <button type="submit" class="btn btn-primary" id="loginBtn">Sign in</button>
+        <div class="login-error" id="loginError"></div>
+      </form>
+    </div>
+  </div>
+
   <div class="logo">
     <h1>Banner Backup Generator</h1>
     <p>Drop your creatives &rarr; get optimised JPG backup images</p>
@@ -64,6 +79,87 @@
 </div>
 
 <script>
+// ---------------------------------------------------------------------------
+// Auth session — persists in sessionStorage
+// ---------------------------------------------------------------------------
+
+const AUTH_KEY = 'bbg_auth';
+
+function getAuth() {
+  try {
+    const raw = sessionStorage.getItem(AUTH_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function setAuth(identity) {
+  sessionStorage.setItem(AUTH_KEY, JSON.stringify(identity));
+}
+
+function clearAuth() {
+  sessionStorage.removeItem(AUTH_KEY);
+}
+
+// Inject auth headers into all fetch calls to /api/*
+const _origFetch = window.fetch;
+window.fetch = function(url, options = {}) {
+  const auth = getAuth();
+  if (auth && typeof url === 'string' && url.startsWith('/api/')) {
+    options = { ...options };
+    options.headers = {
+      ...options.headers,
+      'x-user-id': auth.userId,
+      'x-tenant-id': auth.tenantId,
+      'x-client-id': auth.clientId
+    };
+  }
+  return _origFetch.call(this, url, options);
+};
+
+function handleLogin(event) {
+  event.preventDefault();
+  const btn = document.getElementById('loginBtn');
+  const err = document.getElementById('loginError');
+  const username = document.getElementById('loginUsername').value;
+  const password = document.getElementById('loginPassword').value;
+  btn.disabled = true;
+  btn.textContent = 'Signing in...';
+  err.classList.remove('visible');
+
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  })
+    .then(r => {
+      if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Invalid credentials'); });
+      return r.json();
+    })
+    .then(identity => {
+      setAuth(identity);
+      document.getElementById('loginOverlay').style.display = 'none';
+    })
+    .catch(e => {
+      err.textContent = e.message;
+      err.classList.add('visible');
+    })
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = 'Sign in';
+    });
+  return false;
+}
+
+// On page load, check if auth is needed
+(function init() {
+  if (getAuth()) return;
+  fetch('/api/v1/health').then(r => r.json()).then(h => {
+    if (h.authMode === 'production') {
+      document.getElementById('loginOverlay').style.display = 'flex';
+    }
+  }).catch(() => {});
+})();
+
 let sessionId = null;
 let sessionFiles = [];    // { id, name, type, state, error }
 let polling = false;

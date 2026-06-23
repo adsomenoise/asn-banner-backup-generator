@@ -35,6 +35,7 @@ const MAX_UPLOAD_FILES = 50;
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
 const APP_VERSION = '1.0.0';
+let AUTH_MODE = 'development';
 
 function parseNumberEnv(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -660,6 +661,28 @@ async function handleRetry(req, res) {
   processJob(job.id);
 }
 
+function handleLogin(req, res) {
+  const { username, password } = req.body || {};
+  const adminUser = process.env.ADMIN_USERNAME || 'admin';
+  const adminPass = process.env.ADMIN_PASSWORD;
+
+  if (!adminPass) {
+    return res.status(500).json(errorBody('ADMIN_PASSWORD not configured', 'SERVER_CONFIG'));
+  }
+
+  if (username !== adminUser || password !== adminPass) {
+    metrics.increment('login.rejected', { reason: 'invalid_credentials' });
+    return res.status(401).json(errorBody('Invalid credentials', 'INVALID_CREDENTIALS'));
+  }
+
+  metrics.increment('login.complete');
+  res.json({
+    userId: process.env.AUTH_USER_ID || username,
+    tenantId: process.env.AUTH_TENANT_ID || 'default',
+    clientId: process.env.AUTH_CLIENT_ID || 'default'
+  });
+}
+
 function handleHealth(req, res) {
   const m = metrics.snapshot();
   res.json({
@@ -667,6 +690,7 @@ function handleHealth(req, res) {
     timestamp: new Date().toISOString(),
     version: APP_VERSION,
     uptime: process.uptime(),
+    authMode: AUTH_MODE,
     jobs: jobStore.size,
     metrics: {
       counters: m.counters,
@@ -761,13 +785,19 @@ export async function startWebServer(port = 3001, opts = {}) {
 
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-user-id, x-tenant-id, x-client-id');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
   });
 
   app.use(express.static(path.join(__dirname, 'public')));
+
+  // -----------------------------------------------------------------------
+  // Body parsers
+  // -----------------------------------------------------------------------
+
+  app.use(express.json({ limit: '1mb' }));
 
   // -----------------------------------------------------------------------
   // Request timing middleware
@@ -804,9 +834,13 @@ export async function startWebServer(port = 3001, opts = {}) {
   // -----------------------------------------------------------------------
 
   const authMw = createAuthMiddleware(authOptions);
+  AUTH_MODE = authOptions.mode;
 
   // Health endpoint is public (registered before auth middleware)
   app.get('/api/v1/health', handleHealth);
+
+  // Login endpoint is public (registered before auth middleware)
+  app.post('/api/login', rateLimiter, handleLogin);
 
   app.use('/api', authMw);
 
