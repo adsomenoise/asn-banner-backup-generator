@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libdbus-1-3 \
   libasound2 \
   libatspi2.0-0 \
+  ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
