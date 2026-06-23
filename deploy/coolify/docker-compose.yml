@@ -1,0 +1,36 @@
+version: "3.8"
+services:
+  app:
+    build: ..
+    image: rive-backup-gen:latest
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      CORS_ORIGIN: "https://bbg.bannerama.be"
+      AUTH_MODE: production
+      AUTH_USER_ID_HEADER: x-auth-user-id
+      AUTH_TENANT_ID_HEADER: x-auth-tenant-id
+      AUTH_CLIENT_ID_HEADER: x-auth-client-id
+      RATE_LIMIT_MAX: "30"
+      CAPTURE_CONCURRENCY: "2"
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+    volumes:
+      - ../../temp:/app/temp
+    networks:
+      - appnet
+
+  nginx:
+    image: nginx:stable
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - appnet
+
+networks:
+  appnet:
+    driver: bridge
