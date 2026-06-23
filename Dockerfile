@@ -56,9 +56,9 @@ RUN npm run postinstall
 # Create necessary directories
 RUN mkdir -p temp/uploads temp/work temp/results
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "const port=process.env.PORT||3001;require('http').get('http://localhost:'+port, (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+# Health check — use the app's own /api/v1/health endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "const p=process.env.PORT||3001;require('http').get('http://localhost:'+p+'/api/v1/health',r=>{r.resume();process.exit(r.statusCode<200||r.statusCode>=300?1:0)}).on('error',()=>process.exit(1))"
 
 # Set environment defaults
 ENV NODE_ENV=production
