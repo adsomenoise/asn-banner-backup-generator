@@ -157,6 +157,10 @@ function validatorCleanupAge(job) {
   return new Date(job.updatedAt || job.createdAt).getTime();
 }
 
+function isStaleTerminalValidatorJob(job, now = Date.now()) {
+  return isTerminalValidatorStatus(job.status) && now - validatorCleanupAge(job) > SESSION_TTL_MS;
+}
+
 function getFileWorkDir(job, file) {
   return storage.fileWorkDir(job.id, file.id);
 }
@@ -273,8 +277,7 @@ function pruneStaleSessions() {
 
   validatorStore.list().then(jobs => {
     for (const job of jobs) {
-      if (!isTerminalValidatorStatus(job.status)) continue;
-      if (now - validatorCleanupAge(job) > SESSION_TTL_MS) {
+      if (isStaleTerminalValidatorJob(job, now)) {
         cleanupValidatorJob(job).catch(error => {
           logger.warn('Failed to cleanup stale validator job', { jobId: job.id, error: error.message });
         });
@@ -284,14 +287,20 @@ function pruneStaleSessions() {
 }
 
 async function cleanupValidatorJob(job) {
-  if (!isTerminalValidatorStatus(job.status)) return;
+  if (!isStaleTerminalValidatorJob(job)) return;
+
+  const currentJob = await validatorStore.get(job.id);
+  if (!currentJob || !isStaleTerminalValidatorJob(currentJob)) return;
 
   await Promise.all([
-    ...job.files.map(file => file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()),
-    storage.cleanupJob(job.id),
-    rmdir(validatorJobWorkRoot(job.id))
+    ...currentJob.files.map(file => file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()),
+    storage.cleanupJob(currentJob.id),
+    rmdir(validatorJobWorkRoot(currentJob.id))
   ]);
-  await validatorStore.delete(job.id);
+
+  const deletableJob = await validatorStore.get(currentJob.id);
+  if (!deletableJob || !isStaleTerminalValidatorJob(deletableJob)) return;
+  await validatorStore.delete(deletableJob.id);
 }
 
 async function processJob(jobId) {
