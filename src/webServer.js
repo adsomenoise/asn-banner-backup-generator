@@ -153,6 +153,10 @@ function isTerminalValidatorStatus(status) {
   return status === 'complete' || status === 'error';
 }
 
+function validatorCleanupAge(job) {
+  return new Date(job.updatedAt || job.createdAt).getTime();
+}
+
 function getFileWorkDir(job, file) {
   return storage.fileWorkDir(job.id, file.id);
 }
@@ -270,7 +274,7 @@ function pruneStaleSessions() {
   validatorStore.list().then(jobs => {
     for (const job of jobs) {
       if (!isTerminalValidatorStatus(job.status)) continue;
-      if (now - new Date(job.createdAt).getTime() > SESSION_TTL_MS) {
+      if (now - validatorCleanupAge(job) > SESSION_TTL_MS) {
         cleanupValidatorJob(job).catch(error => {
           logger.warn('Failed to cleanup stale validator job', { jobId: job.id, error: error.message });
         });
