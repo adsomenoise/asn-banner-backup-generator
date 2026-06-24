@@ -5,9 +5,28 @@ import sharp from 'sharp';
 import { logger } from './logger.js';
 
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'];
+const DEFAULT_VIDEO_PROBE_TIMEOUT_MS = 15000;
 
 function isVideoFile(filename) {
   return VIDEO_EXTENSIONS.some(ext => filename.toLowerCase().endsWith(ext));
+}
+
+function createTimeoutGuard(proc, commandName, timeoutMs, reject) {
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    proc.kill('SIGKILL');
+    reject(new Error(`${commandName} timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
+
+  return callback => {
+    if (settled) return false;
+    settled = true;
+    clearTimeout(timer);
+    callback();
+    return true;
+  };
 }
 
 async function getVideoDimensions(videoPath) {
@@ -41,21 +60,23 @@ async function getVideoDimensions(videoPath) {
   });
 }
 
-async function getVideoMetadata(videoPath) {
+async function getVideoMetadata(videoPath, options = {}) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeoutMs || DEFAULT_VIDEO_PROBE_TIMEOUT_MS;
     const proc = spawn('ffprobe', [
       '-v', 'error',
       '-show_entries', 'stream=codec_type,width,height:format=duration,bit_rate',
       '-of', 'json',
       videoPath
     ]);
+    const finish = createTimeoutGuard(proc, 'ffprobe', timeoutMs, reject);
 
     let stdout = '';
     let stderr = '';
     proc.stdout.on('data', chunk => { stdout += chunk.toString(); });
     proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
 
-    proc.on('close', code => {
+    proc.on('close', code => finish(() => {
       if (code !== 0) return reject(new Error(`ffprobe exited with code ${code}: ${stderr}`));
 
       try {
@@ -77,9 +98,9 @@ async function getVideoMetadata(videoPath) {
       } catch (error) {
         reject(new Error(`Could not parse ffprobe JSON: ${error.message}`));
       }
-    });
+    }));
 
-    proc.on('error', reject);
+    proc.on('error', error => finish(() => reject(error)));
   });
 }
 
@@ -92,8 +113,9 @@ function parseIntegratedLoudness(stderr) {
   return Number.parseFloat(lineMatches[lineMatches.length - 1][1]);
 }
 
-async function probeVideoLoudness(videoPath) {
+async function probeVideoLoudness(videoPath, options = {}) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeoutMs || DEFAULT_VIDEO_PROBE_TIMEOUT_MS;
     const proc = spawn('ffmpeg', [
       '-hide_banner',
       '-nostats',
@@ -102,11 +124,12 @@ async function probeVideoLoudness(videoPath) {
       '-f', 'null',
       '-'
     ]);
+    const finish = createTimeoutGuard(proc, 'ffmpeg', timeoutMs, reject);
 
     let stderr = '';
     proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
 
-    proc.on('close', code => {
+    proc.on('close', code => finish(() => {
       const integrated = parseIntegratedLoudness(stderr);
       if (integrated !== null) {
         resolve({ integrated });
@@ -117,9 +140,9 @@ async function probeVideoLoudness(videoPath) {
         return;
       }
       reject(new Error(`ffmpeg did not report integrated loudness: ${stderr}`));
-    });
+    }));
 
-    proc.on('error', reject);
+    proc.on('error', error => finish(() => reject(error)));
   });
 }
 

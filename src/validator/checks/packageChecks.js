@@ -1,4 +1,5 @@
 import AdmZip from 'adm-zip';
+import { randomUUID } from 'crypto';
 import fs from 'fs-extra';
 import path from 'path';
 import { detectBannerSize } from '../../detectBannerSize.js';
@@ -81,6 +82,7 @@ function packageTooLarge(fileSize, preset) {
 export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
   const findings = [];
   const stat = await fs.stat(filePath);
+  const extractName = `validator-extracted-${process.pid}-${Date.now()}-${randomUUID()}`;
   const metadata = {
     fileSize: stat.size,
     htmlEntry: null,
@@ -116,8 +118,8 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
       }));
     }
 
-    await fs.remove(path.join(workDir, 'validator-extracted'));
-    extractedPath = await extractZip(filePath, workDir, { extractName: 'validator-extracted' });
+    await fs.remove(path.join(workDir, extractName));
+    extractedPath = await extractZip(filePath, workDir, { extractName });
   } catch (error) {
     findings.push(buildFinding('error', 'ZIP_EXTRACTION_FAILED', {
       title: 'ZIP could not be extracted',
@@ -128,53 +130,59 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     return { metadata, findings };
   }
 
-  let htmlEntry;
   try {
-    htmlEntry = await findBannerEntry(extractedPath);
-  } catch {
-    findings.push(buildFinding('error', 'MISSING_HTML', {
-      title: 'Missing HTML entry',
-      message: 'This ZIP does not contain an HTML entry file.',
-      suggestion: 'Add an index.html file at the root of the ZIP or include a valid HTML banner entry.',
-      path: fileName
-    }));
-    return { metadata, findings };
-  }
+    let htmlEntry;
+    try {
+      htmlEntry = await findBannerEntry(extractedPath);
+    } catch {
+      findings.push(buildFinding('error', 'MISSING_HTML', {
+        title: 'Missing HTML entry',
+        message: 'This ZIP does not contain an HTML entry file.',
+        suggestion: 'Add an index.html file at the root of the ZIP or include a valid HTML banner entry.',
+        path: fileName
+      }));
+      return { metadata, findings };
+    }
 
-  metadata.htmlEntry = path.relative(extractedPath, htmlEntry);
-  const html = await fs.readFile(htmlEntry, 'utf8');
-  const dimensions = await detectBannerSize(htmlEntry, fileName);
-  metadata.dimensions = dimensions;
-  metadata.dimensionSource = inferDimensionSource(html, fileName, dimensions);
-  metadata.externalReferences = detectExternalReferences(html);
+    metadata.htmlEntry = path.relative(extractedPath, htmlEntry);
+    const html = await fs.readFile(htmlEntry, 'utf8');
+    const dimensions = await detectBannerSize(htmlEntry, fileName);
+    metadata.dimensions = dimensions;
+    metadata.dimensionSource = inferDimensionSource(html, fileName, dimensions);
+    metadata.externalReferences = detectExternalReferences(html);
 
-  const renderResult = await checkRenderability({
-    htmlPath: htmlEntry,
-    dimensions,
-    displayPath: metadata.htmlEntry
-  });
-  metadata.renderable = renderResult.metadata.rendered && !renderResult.findings.some(finding => finding.code === 'RENDER_FAILED');
-  findings.push(...renderResult.findings);
+    const renderResult = await checkRenderability({
+      htmlPath: htmlEntry,
+      dimensions,
+      displayPath: metadata.htmlEntry
+    });
+    metadata.renderable = renderResult.metadata.rendered && !renderResult.findings.some(finding => finding.code === 'RENDER_FAILED');
+    findings.push(...renderResult.findings);
 
-  if (preset.requiresClickTag && !detectClickTag(html)) {
-    findings.push(buildFinding('error', 'MISSING_CLICKTAG', {
-      title: 'Missing clickTag',
-      message: 'The HTML does not reference clickTag.',
-      suggestion: 'Add clickTag handling required by the selected ad destination.',
-      path: metadata.htmlEntry
-    }));
-  }
-
-  if (!preset.allowExternalReferences) {
-    for (const url of metadata.externalReferences) {
-      findings.push(buildFinding('warning', 'EXTERNAL_REFERENCE', {
-        title: 'External reference detected',
-        message: `The HTML references ${url}.`,
-        suggestion: 'Package required assets inside the ZIP unless the destination explicitly allows external references.',
+    if (preset.requiresClickTag && !detectClickTag(html)) {
+      findings.push(buildFinding('error', 'MISSING_CLICKTAG', {
+        title: 'Missing clickTag',
+        message: 'The HTML does not reference clickTag.',
+        suggestion: 'Add clickTag handling required by the selected ad destination.',
         path: metadata.htmlEntry
       }));
     }
-  }
 
-  return { metadata, findings };
+    if (!preset.allowExternalReferences) {
+      for (const url of metadata.externalReferences) {
+        findings.push(buildFinding('warning', 'EXTERNAL_REFERENCE', {
+          title: 'External reference detected',
+          message: `The HTML references ${url}.`,
+          suggestion: 'Package required assets inside the ZIP unless the destination explicitly allows external references.',
+          path: metadata.htmlEntry
+        }));
+      }
+    }
+
+    return { metadata, findings };
+  } finally {
+    if (extractedPath) {
+      await fs.remove(extractedPath).catch(() => {});
+    }
+  }
 }

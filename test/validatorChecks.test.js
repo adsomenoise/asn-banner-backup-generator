@@ -13,7 +13,7 @@ import { checkRenderability } from '../src/validator/checks/renderChecks.js';
 import { checkRiveFile } from '../src/validator/checks/riveChecks.js';
 import { checkVideoFile, classifyVideoMetadata } from '../src/validator/checks/videoChecks.js';
 import { getPreset } from '../src/validator/presets.js';
-import { probeVideoLoudness } from '../src/captureVideo.js';
+import { getVideoMetadata, probeVideoLoudness } from '../src/captureVideo.js';
 
 const TEST_TEMP = path.resolve('test-temp-validator-checks');
 
@@ -133,6 +133,24 @@ describe('validator package checks', () => {
     assert.ok(codes(result.findings).includes('EXTERNAL_REFERENCE'));
     assert.deepStrictEqual(result.metadata.externalReferences, ['https://cdn.example.com/lib.js']);
   });
+
+  it('does not use the legacy shared extraction directory', async () => {
+    const zipPath = await writeZip('isolated-extract.zip', [
+      { name: 'asset.txt', content: 'not a banner' }
+    ]);
+    const legacyExtractPath = path.join(TEST_TEMP, 'validator-extracted');
+    await fs.remove(legacyExtractPath);
+
+    const result = await checkZipPackage({
+      filePath: zipPath,
+      fileName: 'isolated-extract.zip',
+      workDir: TEST_TEMP,
+      preset: getPreset('generic')
+    });
+
+    assert.ok(codes(result.findings).includes('MISSING_HTML'));
+    assert.strictEqual(await fs.pathExists(legacyExtractPath), false);
+  });
 });
 
 describe('validator render checks', () => {
@@ -232,6 +250,44 @@ describe('validator video checks', () => {
       await assert.rejects(
         () => probeVideoLoudness(path.join(TEST_TEMP, 'video.mp4')),
         /ffmpeg did not report integrated loudness/
+      );
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it('times out hanging video metadata probes', async () => {
+    const binDir = path.join(TEST_TEMP, 'fake-bin-hanging-ffprobe');
+    const ffprobePath = path.join(binDir, 'ffprobe');
+    const originalPath = process.env.PATH;
+    await fs.ensureDir(binDir);
+    await fs.writeFile(ffprobePath, '#!/bin/sh\nsleep 5\n');
+    await fs.chmod(ffprobePath, 0o755);
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+
+    try {
+      await assert.rejects(
+        () => getVideoMetadata(path.join(TEST_TEMP, 'video.mp4'), { timeoutMs: 50 }),
+        /ffprobe timed out after 50ms/
+      );
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it('times out hanging loudness probes', async () => {
+    const binDir = path.join(TEST_TEMP, 'fake-bin-hanging-ffmpeg');
+    const ffmpegPath = path.join(binDir, 'ffmpeg');
+    const originalPath = process.env.PATH;
+    await fs.ensureDir(binDir);
+    await fs.writeFile(ffmpegPath, '#!/bin/sh\nsleep 5\n');
+    await fs.chmod(ffmpegPath, 0o755);
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+
+    try {
+      await assert.rejects(
+        () => probeVideoLoudness(path.join(TEST_TEMP, 'video.mp4'), { timeoutMs: 50 }),
+        /ffmpeg timed out after 50ms/
       );
     } finally {
       process.env.PATH = originalPath;
