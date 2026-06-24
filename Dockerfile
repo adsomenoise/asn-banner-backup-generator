@@ -20,6 +20,7 @@ FROM node:20
 # Install runtime dependencies for Playwright and image processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
   libstdc++6 \
+  libglib2.0-0 \
   libx11-6 \
   libx11-xcb1 \
   libxcb1 \
@@ -27,14 +28,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libxcomposite1 \
   libxdamage1 \
   libxfixes3 \
+  libxshmfence1 \
   libxkbcommon0 \
   libgbm1 \
+  libdrm2 \
   libpango-1.0-0 \
   libpangocairo-1.0-0 \
   libcairo2 \
   libjpeg62-turbo \
   libpng16-16 \
   libatk1.0-0 \
+  libatk-bridge2.0-0 \
+  libgtk-3-0 \
+  libcups2 \
   libnspr4 \
   libnss3 \
   libdbus-1-3 \
