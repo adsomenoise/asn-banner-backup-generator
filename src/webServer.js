@@ -139,10 +139,18 @@ function validatorWorkRoot() {
   return path.join(storage.root, 'validator');
 }
 
+function validatorJobWorkRoot(jobId) {
+  return path.join(validatorWorkRoot(), jobId);
+}
+
 function validatorFileType(fileName) {
   if (/\.riv$/i.test(fileName)) return 'riv';
   if (isVideoFile(fileName)) return 'video';
   return 'zip';
+}
+
+function isTerminalValidatorStatus(status) {
+  return status === 'complete' || status === 'error';
 }
 
 function getFileWorkDir(job, file) {
@@ -258,6 +266,28 @@ function pruneStaleSessions() {
       }
     }
   });
+
+  validatorStore.list().then(jobs => {
+    for (const job of jobs) {
+      if (!isTerminalValidatorStatus(job.status)) continue;
+      if (now - new Date(job.createdAt).getTime() > SESSION_TTL_MS) {
+        cleanupValidatorJob(job).catch(error => {
+          logger.warn('Failed to cleanup stale validator job', { jobId: job.id, error: error.message });
+        });
+      }
+    }
+  });
+}
+
+async function cleanupValidatorJob(job) {
+  if (!isTerminalValidatorStatus(job.status)) return;
+
+  await Promise.all([
+    ...job.files.map(file => file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()),
+    storage.cleanupJob(job.id),
+    rmdir(validatorJobWorkRoot(job.id))
+  ]);
+  await validatorStore.delete(job.id);
 }
 
 async function processJob(jobId) {

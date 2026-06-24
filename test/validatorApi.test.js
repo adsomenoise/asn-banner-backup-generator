@@ -100,11 +100,39 @@ describe('Validator API', () => {
       body: JSON.stringify({ preset: 'generic' })
     });
     assert.strictEqual(startResponse.status, 200);
+    const startBody = await json(startResponse);
+    assert.strictEqual(startBody.status, 'validating');
 
     const job = await pollValidatorJob(upload.jobId);
     assert.strictEqual(job.status, 'complete');
     assert.strictEqual(job.overall.status, 'fail');
     assert.ok(findingCodes(job.files[0]).includes('MISSING_HTML'));
+  });
+
+  it('rejects duplicate validation starts while a job is validating', async () => {
+    const badZip = zipBuffer([
+      { name: 'asset.txt', content: 'not a banner' }
+    ]);
+    const { body: upload } = await uploadValidatorFile('duplicate.zip', badZip);
+
+    const firstResponse = await fetch(`${base}/validator/jobs/${upload.jobId}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset: 'generic' })
+    });
+    assert.strictEqual(firstResponse.status, 200);
+
+    const secondResponse = await fetch(`${base}/validator/jobs/${upload.jobId}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset: 'generic' })
+    });
+
+    assert.strictEqual(secondResponse.status, 409);
+    const secondBody = await json(secondResponse);
+    assert.strictEqual(secondBody.code, 'ALREADY_VALIDATING');
+
+    await pollValidatorJob(upload.jobId);
   });
 
   it('rejects unknown validator presets', async () => {
