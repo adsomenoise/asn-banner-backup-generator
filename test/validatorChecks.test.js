@@ -10,8 +10,9 @@ import {
 } from '../src/validator/checks/packageChecks.js';
 import { checkRenderability } from '../src/validator/checks/renderChecks.js';
 import { checkRiveFile } from '../src/validator/checks/riveChecks.js';
-import { classifyVideoMetadata } from '../src/validator/checks/videoChecks.js';
+import { checkVideoFile, classifyVideoMetadata } from '../src/validator/checks/videoChecks.js';
 import { getPreset } from '../src/validator/presets.js';
+import { probeVideoLoudness } from '../src/captureVideo.js';
 
 const TEST_TEMP = path.resolve('test-temp-validator-checks');
 
@@ -52,6 +53,22 @@ describe('validator package checks', () => {
 
     assert.ok(codes(result.findings).includes('MISSING_HTML'));
     assert.strictEqual(result.metadata.htmlEntry, null);
+    assert.strictEqual(result.metadata.renderable, false);
+  });
+
+  it('returns a ZIP extraction finding for corrupt ZIP files instead of throwing', async () => {
+    const zipPath = path.join(TEST_TEMP, 'corrupt.zip');
+    await fs.writeFile(zipPath, 'this is not a zip');
+
+    const result = await checkZipPackage({
+      filePath: zipPath,
+      fileName: 'corrupt.zip',
+      workDir: TEST_TEMP,
+      preset: getPreset('generic')
+    });
+
+    assert.ok(codes(result.findings).includes('ZIP_EXTRACTION_FAILED'));
+    assert.strictEqual(result.metadata.entryCount, 0);
     assert.strictEqual(result.metadata.renderable, false);
   });
 
@@ -126,5 +143,37 @@ describe('validator video checks', () => {
       'VIDEO_LOUDNESS_HIGH'
     ]);
     assert.strictEqual(result.metadata.hasAudio, true);
+  });
+
+  it('rejects loudness probing when ffmpeg fails without parseable loudness', async () => {
+    const binDir = path.join(TEST_TEMP, 'fake-bin');
+    const ffmpegPath = path.join(binDir, 'ffmpeg');
+    const originalPath = process.env.PATH;
+    await fs.ensureDir(binDir);
+    await fs.writeFile(ffmpegPath, '#!/bin/sh\necho "ffmpeg failed" >&2\nexit 1\n');
+    await fs.chmod(ffmpegPath, 0o755);
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+
+    try {
+      await assert.rejects(
+        () => probeVideoLoudness(path.join(TEST_TEMP, 'video.mp4')),
+        /ffmpeg exited with code 1/
+      );
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it('returns VIDEO_PROBE_FAILED for an invalid video file', async () => {
+    const videoPath = path.join(TEST_TEMP, 'invalid.mp4');
+    await fs.writeFile(videoPath, 'not a video');
+
+    const result = await checkVideoFile({
+      filePath: videoPath,
+      fileName: 'invalid.mp4',
+      preset: getPreset('video')
+    });
+
+    assert.deepStrictEqual(codes(result.findings), ['VIDEO_PROBE_FAILED']);
   });
 });

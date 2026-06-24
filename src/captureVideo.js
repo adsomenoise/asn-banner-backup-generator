@@ -106,8 +106,17 @@ async function probeVideoLoudness(videoPath) {
     let stderr = '';
     proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
 
-    proc.on('close', () => {
-      resolve({ integrated: parseIntegratedLoudness(stderr) });
+    proc.on('close', code => {
+      const integrated = parseIntegratedLoudness(stderr);
+      if (integrated !== null) {
+        resolve({ integrated });
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
+        return;
+      }
+      resolve({ integrated: null });
     });
 
     proc.on('error', reject);

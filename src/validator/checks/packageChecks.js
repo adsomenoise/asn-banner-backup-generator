@@ -81,14 +81,13 @@ function packageTooLarge(fileSize, preset) {
 export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
   const findings = [];
   const stat = await fs.stat(filePath);
-  const entryInspection = inspectZipEntries(filePath, preset);
   const metadata = {
     fileSize: stat.size,
     htmlEntry: null,
     dimensions: null,
     dimensionSource: null,
-    entryCount: entryInspection.entryCount,
-    unsupportedEntries: entryInspection.unsupportedEntries,
+    entryCount: 0,
+    unsupportedEntries: [],
     externalReferences: [],
     renderable: false
   };
@@ -102,17 +101,21 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     }));
   }
 
-  for (const entryName of entryInspection.unsupportedEntries.slice(0, MAX_UNSUPPORTED_FINDINGS)) {
-    findings.push(buildFinding('warning', 'UNSUPPORTED_FILE_TYPE', {
-      title: 'Unsupported file type',
-      message: `${entryName} is not in the preset allowed extension list.`,
-      suggestion: 'Remove unsupported files or choose a preset that allows this asset type.',
-      path: entryName
-    }));
-  }
-
   let extractedPath;
   try {
+    const entryInspection = inspectZipEntries(filePath, preset);
+    metadata.entryCount = entryInspection.entryCount;
+    metadata.unsupportedEntries = entryInspection.unsupportedEntries;
+
+    for (const entryName of entryInspection.unsupportedEntries.slice(0, MAX_UNSUPPORTED_FINDINGS)) {
+      findings.push(buildFinding('warning', 'UNSUPPORTED_FILE_TYPE', {
+        title: 'Unsupported file type',
+        message: `${entryName} is not in the preset allowed extension list.`,
+        suggestion: 'Remove unsupported files or choose a preset that allows this asset type.',
+        path: entryName
+      }));
+    }
+
     await fs.remove(path.join(workDir, 'validator-extracted'));
     extractedPath = await extractZip(filePath, workDir, { extractName: 'validator-extracted' });
   } catch (error) {
