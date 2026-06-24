@@ -16,7 +16,7 @@
 </head>
 <body>
 <div class="container" role="main">
-  <div class="login-overlay" id="loginOverlay" role="dialog" aria-modal="true" aria-label="Login">
+  <div class="login-overlay" id="loginOverlay" role="dialog" aria-modal="true" aria-label="Login" tabindex="-1">
     <div class="login-box">
       <h2>Banner Backup Generator</h2>
       <p class="login-desc">Sign in to continue</p>
@@ -72,7 +72,7 @@
   </div>
 </div>
 
-<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-label="Processing files">
+<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-label="Processing files" tabindex="-1">
   <img src="animation.gif" alt="Processing..." aria-hidden="true">
   <div class="waiting-text" id="waitingText"></div>
   <div class="overlay-progress">
@@ -154,7 +154,7 @@ function handleLogin(event) {
     })
     .then(identity => {
       setAuth(identity);
-      document.getElementById('loginOverlay').style.display = 'none';
+      closeLoginDialog();
     })
     .catch(e => {
       err.textContent = e.message;
@@ -172,7 +172,7 @@ function handleLogin(event) {
   if (getAuth()) return;
   fetch('/api/v1/health').then(r => r.json()).then(h => {
     if (h.authMode === 'production') {
-      document.getElementById('loginOverlay').style.display = 'flex';
+      showLoginDialog();
     }
   }).catch(() => {});
 })();
@@ -198,6 +198,109 @@ const errorSummary = document.getElementById('errorSummary');
 const overlayProgressFill = document.getElementById('overlayProgressFill');
 const overlayProgressText = document.getElementById('overlayProgressText');
 const overlayFiles = document.getElementById('overlayFiles');
+const loginOverlay = document.getElementById('loginOverlay');
+const appContainer = document.querySelector('.container');
+
+let activeModal = null;
+
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])'
+].join(',');
+
+function visibleFocusableElements(root) {
+  return Array.from(root.querySelectorAll(FOCUSABLE_SELECTOR))
+    .filter(el => !el.closest('[inert]') && el.offsetParent !== null);
+}
+
+function setAppBackgroundInert(dialog, inert) {
+  if (dialog === loginOverlay) {
+    Array.from(appContainer.children)
+      .filter(child => child !== loginOverlay)
+      .forEach(child => { child.inert = inert; });
+    return;
+  }
+
+  appContainer.inert = inert;
+}
+
+function openModal(dialog, options = {}) {
+  if (activeModal && activeModal.dialog !== dialog) {
+    closeModal(activeModal.dialog, { restoreFocus: false });
+  }
+
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  setAppBackgroundInert(dialog, true);
+  activeModal = { dialog, previousFocus };
+
+  const focusTarget = options.initialFocus || visibleFocusableElements(dialog)[0] || dialog;
+  focusTarget.focus({ preventScroll: true });
+}
+
+function closeModal(dialog, options = {}) {
+  if (!activeModal || activeModal.dialog !== dialog) return;
+
+  const previousFocus = activeModal.previousFocus;
+  activeModal = null;
+  setAppBackgroundInert(dialog, false);
+
+  if (options.restoreFocus !== false && previousFocus && document.contains(previousFocus)) {
+    previousFocus.focus({ preventScroll: true });
+  }
+}
+
+document.addEventListener('keydown', event => {
+  if (!activeModal || event.key !== 'Tab') return;
+
+  const focusable = visibleFocusableElements(activeModal.dialog);
+  const fallback = activeModal.dialog;
+  if (focusable.length === 0) {
+    event.preventDefault();
+    fallback.focus({ preventScroll: true });
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+
+  if (event.shiftKey && (active === first || active === activeModal.dialog)) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+});
+
+function showLoginDialog() {
+  loginOverlay.style.display = 'flex';
+  openModal(loginOverlay, { initialFocus: document.getElementById('loginUsername') });
+}
+
+function closeLoginDialog() {
+  loginOverlay.style.display = 'none';
+  closeModal(loginOverlay);
+}
+
+function showProcessingDialog() {
+  overlay.classList.add('visible');
+  openModal(overlay);
+}
+
+function closeProcessingDialog(options) {
+  overlay.classList.remove('visible');
+  closeModal(overlay, options);
+}
+
+window.showLoginDialog = showLoginDialog;
+window.closeLoginDialog = closeLoginDialog;
+window.showProcessingDialog = showProcessingDialog;
+window.closeProcessingDialog = closeProcessingDialog;
 
 const waitingMessages = [
   "Reticulating splines...",
@@ -474,7 +577,7 @@ async function startProcessing() {
   retryBtn.classList.add('hidden');
   resetBtn.classList.add('hidden');
   hideErrorSummary();
-  overlay.classList.add('visible');
+  showProcessingDialog();
   startWaitingText();
   overlayProgressFill.style.width = '0%';
   overlayProgressText.textContent = 'Starting...';
@@ -489,7 +592,7 @@ async function startProcessing() {
   const res = await fetch(`/api/v1/jobs/${sessionId}/process`, { method: 'POST' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Failed to start' }));
-    overlay.classList.remove('visible');
+    closeProcessingDialog();
     stopWaitingText();
     progressText.textContent = err.error || 'Failed to start processing';
     processBtn.disabled = false;
@@ -510,7 +613,7 @@ async function startRetry() {
   retryBtn.classList.add('hidden');
   resetBtn.classList.add('hidden');
   hideErrorSummary();
-  overlay.classList.add('visible');
+  showProcessingDialog();
   startWaitingText();
   overlayProgressFill.style.width = '0%';
   overlayProgressText.textContent = 'Retrying failed files...';
@@ -522,7 +625,7 @@ async function startRetry() {
   const res = await fetch(`/api/v1/jobs/${sessionId}/retry`, { method: 'POST' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Retry failed', code: 'UNKNOWN' }));
-    overlay.classList.remove('visible');
+    closeProcessingDialog();
     stopWaitingText();
     progressText.textContent = err.error || 'Retry failed';
 
@@ -574,7 +677,7 @@ async function pollStatus() {
 
       if (data.status === 'complete') {
         completed = true;
-        overlay.classList.remove('visible');
+        closeProcessingDialog({ restoreFocus: false });
         stopWaitingText();
         progressFill.style.width = '100%';
 
@@ -602,13 +705,16 @@ async function pollStatus() {
           retryBtn.textContent = `Retry failed (${failCount})`;
         }
         resetBtn.classList.remove('hidden');
+        if (successCount === 0) {
+          (data.canRetry ? retryBtn : resetBtn).focus();
+        }
         polling = false;
         return;
       }
 
       if (data.status === 'error') {
         completed = true;
-        overlay.classList.remove('visible');
+        closeProcessingDialog();
         stopWaitingText();
         progressText.textContent = 'Processing failed';
         showErrorSummary('An unexpected error occurred during processing.');

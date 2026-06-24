@@ -48,10 +48,12 @@ describe('Frontend processing UI', () => {
     const progressText = await page.locator('#progressText').textContent();
     const overlayClass = await page.locator('#overlay').getAttribute('class');
     const badgeText = await page.locator('.state-badge').textContent();
+    const focusedElementId = await page.evaluate(() => document.activeElement.id);
 
     assert.strictEqual(progressText, 'All 1 file(s) failed');
     assert.strictEqual(overlayClass, 'overlay');
     assert.match(badgeText, /failed/);
+    assert.match(focusedElementId, /^(retryBtn|resetBtn)$/);
 
     await page.close();
   });
@@ -92,6 +94,54 @@ describe('Frontend processing UI', () => {
 
     assert.strictEqual(expired.auth, null);
     assert.strictEqual(expired.raw, null);
+
+    await page.close();
+  });
+
+  it('moves focus into the login dialog, traps focus, and restores it when closed', async () => {
+    const page = await browser.newPage();
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+
+    await page.focus('#dropZone');
+    await page.evaluate(() => window.showLoginDialog());
+
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'loginUsername');
+    assert.strictEqual(await page.locator('.logo').getAttribute('inert'), '');
+    assert.strictEqual(await page.locator('#dropZone').getAttribute('inert'), '');
+
+    await page.keyboard.press('Shift+Tab');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'loginBtn');
+
+    await page.keyboard.press('Tab');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'loginUsername');
+
+    await page.evaluate(() => window.closeLoginDialog());
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'dropZone');
+    assert.strictEqual(await page.locator('.logo').getAttribute('inert'), null);
+    assert.strictEqual(await page.locator('#dropZone').getAttribute('inert'), null);
+
+    await page.close();
+  });
+
+  it('moves focus into the processing dialog, traps focus, and restores it when closed', async () => {
+    const page = await browser.newPage();
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+
+    await page.focus('#dropZone');
+    await page.evaluate(() => window.showProcessingDialog());
+
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'overlay');
+    assert.strictEqual(await page.locator('.container').getAttribute('inert'), '');
+
+    await page.keyboard.press('Tab');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'overlay');
+
+    await page.keyboard.press('Shift+Tab');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'overlay');
+
+    await page.evaluate(() => window.closeProcessingDialog());
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'dropZone');
+    assert.strictEqual(await page.locator('.container').getAttribute('inert'), null);
 
     await page.close();
   });
