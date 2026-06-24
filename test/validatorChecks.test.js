@@ -6,7 +6,8 @@ import AdmZip from 'adm-zip';
 import {
   checkZipPackage,
   detectClickTag,
-  detectExternalReferences
+  detectExternalReferences,
+  inspectZipEntries
 } from '../src/validator/checks/packageChecks.js';
 import { checkRenderability } from '../src/validator/checks/renderChecks.js';
 import { checkRiveFile } from '../src/validator/checks/riveChecks.js';
@@ -77,6 +78,60 @@ describe('validator package checks', () => {
 
     assert.strictEqual(detectClickTag(html), true);
     assert.deepStrictEqual(detectExternalReferences(html), ['https://cdn.example.com/lib.js']);
+  });
+
+  it('inspects ZIP entry shape and unsupported entries', async () => {
+    const zipPath = await writeZip('mixed-assets.zip', [
+      { name: 'index.html', content: '<!doctype html>' },
+      { name: 'asset.txt', content: 'unsupported' }
+    ]);
+
+    const result = inspectZipEntries(zipPath, getPreset('generic'));
+
+    assert.strictEqual(result.entryCount, 2);
+    assert.ok(result.totalBytes > 0);
+    assert.deepStrictEqual(result.unsupportedEntries, ['asset.txt']);
+  });
+
+  it('reports packages over the preset size limit', async () => {
+    const zipPath = await writeZip('too-large.zip', [
+      { name: 'index.html', content: '<!doctype html><style>body{margin:0;background:#f00}</style>' }
+    ]);
+    const preset = { ...getPreset('generic'), maxUploadBytes: 1 };
+
+    const result = await checkZipPackage({
+      filePath: zipPath,
+      fileName: 'too-large.zip',
+      workDir: TEST_TEMP,
+      preset
+    });
+
+    assert.ok(codes(result.findings).includes('PACKAGE_TOO_LARGE'));
+  });
+
+  it('reports missing clickTag and external references for minimal HTML packages', async () => {
+    const zipPath = await writeZip('missing-clicktag-external.zip', [
+      {
+        name: 'index.html',
+        content: '<!doctype html><meta name="ad.size" content="width=120,height=80"><style>body{margin:0;background:#f00}</style><script src="https://cdn.example.com/lib.js"></script>'
+      }
+    ]);
+    const preset = {
+      ...getPreset('generic'),
+      requiresClickTag: true,
+      allowExternalReferences: false
+    };
+
+    const result = await checkZipPackage({
+      filePath: zipPath,
+      fileName: 'missing-clicktag-external.zip',
+      workDir: TEST_TEMP,
+      preset
+    });
+
+    assert.ok(codes(result.findings).includes('MISSING_CLICKTAG'));
+    assert.ok(codes(result.findings).includes('EXTERNAL_REFERENCE'));
+    assert.deepStrictEqual(result.metadata.externalReferences, ['https://cdn.example.com/lib.js']);
   });
 });
 
@@ -158,6 +213,25 @@ describe('validator video checks', () => {
       await assert.rejects(
         () => probeVideoLoudness(path.join(TEST_TEMP, 'video.mp4')),
         /ffmpeg exited with code 1/
+      );
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it('rejects loudness probing when ffmpeg exits cleanly without parseable loudness', async () => {
+    const binDir = path.join(TEST_TEMP, 'fake-bin-clean');
+    const ffmpegPath = path.join(binDir, 'ffmpeg');
+    const originalPath = process.env.PATH;
+    await fs.ensureDir(binDir);
+    await fs.writeFile(ffmpegPath, '#!/bin/sh\necho "analysis completed without summary" >&2\nexit 0\n');
+    await fs.chmod(ffmpegPath, 0o755);
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+
+    try {
+      await assert.rejects(
+        () => probeVideoLoudness(path.join(TEST_TEMP, 'video.mp4')),
+        /ffmpeg did not report integrated loudness/
       );
     } finally {
       process.env.PATH = originalPath;

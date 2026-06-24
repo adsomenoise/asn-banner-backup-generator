@@ -116,7 +116,7 @@ async function probeVideoLoudness(videoPath) {
         reject(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
         return;
       }
-      resolve({ integrated: null });
+      reject(new Error(`ffmpeg did not report integrated loudness: ${stderr}`));
     });
 
     proc.on('error', reject);
