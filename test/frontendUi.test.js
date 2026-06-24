@@ -55,4 +55,44 @@ describe('Frontend processing UI', () => {
 
     await page.close();
   });
+
+  it('persists login for 14 days and clears expired auth', async () => {
+    const page = await browser.newPage();
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+
+    const persisted = await page.evaluate(() => {
+      const before = Date.now();
+      window.setAuth({ userId: 'alice', tenantId: 'acme', clientId: 'brand' });
+      const after = Date.now();
+      return {
+        before,
+        after,
+        raw: localStorage.getItem('bbg_auth'),
+        auth: window.getAuth()
+      };
+    });
+
+    const payload = JSON.parse(persisted.raw);
+    const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000;
+    assert.deepStrictEqual(persisted.auth, { userId: 'alice', tenantId: 'acme', clientId: 'brand' });
+    assert.deepStrictEqual(payload.identity, { userId: 'alice', tenantId: 'acme', clientId: 'brand' });
+    assert.ok(payload.expiresAt >= persisted.before + fourteenDaysMs);
+    assert.ok(payload.expiresAt <= persisted.after + fourteenDaysMs);
+
+    const expired = await page.evaluate(() => {
+      localStorage.setItem('bbg_auth', JSON.stringify({
+        identity: { userId: 'expired', tenantId: 'old', clientId: 'old' },
+        expiresAt: Date.now() - 1
+      }));
+      return {
+        auth: window.getAuth(),
+        raw: localStorage.getItem('bbg_auth')
+      };
+    });
+
+    assert.strictEqual(expired.auth, null);
+    assert.strictEqual(expired.raw, null);
+
+    await page.close();
+  });
 });

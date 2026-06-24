@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
 <title>Banner Backup Generator</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -80,24 +84,37 @@
 
 <script>
 // ---------------------------------------------------------------------------
-// Auth session — persists in sessionStorage
+// Auth session — remember login for 14 days
 // ---------------------------------------------------------------------------
 
 const AUTH_KEY = 'bbg_auth';
+const AUTH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 function getAuth() {
   try {
-    const raw = sessionStorage.getItem(AUTH_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
+    const raw = localStorage.getItem(AUTH_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    if (!payload || !payload.identity || !payload.expiresAt || Date.now() >= payload.expiresAt) {
+      clearAuth();
+      return null;
+    }
+    return payload.identity;
+  } catch {
+    clearAuth();
+    return null;
+  }
 }
 
 function setAuth(identity) {
-  sessionStorage.setItem(AUTH_KEY, JSON.stringify(identity));
+  localStorage.setItem(AUTH_KEY, JSON.stringify({
+    identity,
+    expiresAt: Date.now() + AUTH_TTL_MS
+  }));
 }
 
 function clearAuth() {
-  sessionStorage.removeItem(AUTH_KEY);
+  localStorage.removeItem(AUTH_KEY);
 }
 
 // Inject auth headers into all fetch calls to /api/*

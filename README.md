@@ -40,6 +40,50 @@ Key variables:
 - `AUTH_MODE` (`development` or `production`)
 - `AUTH_USER_ID_HEADER`, `AUTH_TENANT_ID_HEADER`, `AUTH_CLIENT_ID_HEADER` (identity headers expected from your gateway)
 
+### Coolify Live Deploy Checklist
+
+When deploying to Coolify, make sure the app is built from the repository `Dockerfile` (not auto-detected Nixpacks), otherwise Playwright runtime libraries can be missing.
+
+1. In Coolify, set build mode to `Dockerfile` and redeploy with cache disabled.
+2. Configure these required environment variables:
+  - `NODE_ENV=production`
+  - `PORT=3001`
+  - `CORS_ORIGIN=https://<your-domain>`
+  - `AUTH_MODE=production`
+  - `AUTH_USER_ID_HEADER=x-user-id`
+  - `AUTH_TENANT_ID_HEADER=x-tenant-id`
+  - `AUTH_CLIENT_ID_HEADER=x-client-id`
+  - `ADMIN_PASSWORD=<strong-secret>`
+3. Mount persistent storage to `/app/temp`.
+4. Keep initial `CAPTURE_CONCURRENCY=2` and increase only after monitoring CPU/RAM.
+
+#### Verify Runtime Dependencies In The Running Container
+
+If uploads fail with Playwright launch errors like `error while loading shared libraries`, open a shell in the running container and run:
+
+```bash
+ldconfig -p | grep -E 'libatk-bridge-2.0.so.0|libgtk-3.so.0|libcups.so.2'
+```
+
+Expected: all three libraries are listed.
+
+#### Verify Playwright Browser Install
+
+```bash
+ls -la /root/.cache/ms-playwright
+```
+
+You should see a Chromium folder (for example `chromium_headless_shell-*`).
+
+#### Quick Health Check
+
+```bash
+curl -i http://127.0.0.1:3001/api/v1/health
+```
+
+If `authMode` is `production`, the frontend login flow must complete before upload calls.
+Successful frontend logins are remembered in the browser for 14 days.
+
 ## Usage — CLI
 
 1. Place banner ZIP files in the `input/` directory
@@ -489,6 +533,12 @@ await startWebServer(3001, {
 
 `GET /api/v1/health` is registered before the auth middleware and does not require authentication, even in production mode.
 
+### Frontend Login Persistence
+
+The built-in web UI exposes `POST /api/login` for the simple admin login form. On successful login, the browser stores the returned identity in `localStorage` with a 14-day expiry and sends it as auth headers on `/api/*` requests. Expired or malformed login records are cleared automatically.
+
+Set `ADMIN_PASSWORD` in production. `ADMIN_USERNAME` defaults to `admin` when unset.
+
 ## Security & Production Notes
 
 ### ZIP Safety
@@ -545,7 +595,7 @@ The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the re
 
 ### Threat Model Assumptions
 
-- The service is deployed behind an **authenticated reverse proxy** that strips downstream headers and injects a trusted `X-User-Id` (or equivalent) header. The service itself does not implement user-facing login or session management.
+- For platform-managed auth, deploy the service behind an **authenticated reverse proxy** that strips downstream headers and injects a trusted `X-User-Id` (or equivalent) header. The built-in frontend login is a lightweight admin flow for the bundled web UI and stores remembered identity client-side for 14 days.
 - The local file server binds to `localhost` and is never exposed to external traffic.
 - The global rate limiter is an in-memory token bucket — it resets on process restart. For multi-instance deployments, a shared rate limiter (e.g. Redis) should be added via custom middleware.
 - The `--disable-web-security` Playwright flag is required for Rive CDN cross-origin loading and is safe because the URLs Playwright navigates to are always derived from job-scoped storage paths.
