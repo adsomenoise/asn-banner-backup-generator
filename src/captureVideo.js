@@ -41,6 +41,79 @@ async function getVideoDimensions(videoPath) {
   });
 }
 
+async function getVideoMetadata(videoPath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'stream=codec_type,width,height:format=duration,bit_rate',
+      '-of', 'json',
+      videoPath
+    ]);
+
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error(`ffprobe exited with code ${code}: ${stderr}`));
+
+      try {
+        const parsed = JSON.parse(stdout);
+        const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+        const videoStream = streams.find(stream => stream.codec_type === 'video');
+        const hasAudio = streams.some(stream => stream.codec_type === 'audio');
+        const duration = Number.parseFloat(parsed.format?.duration);
+        const bitrate = Number.parseInt(parsed.format?.bit_rate, 10);
+
+        resolve({
+          dimensions: videoStream?.width && videoStream?.height
+            ? { width: videoStream.width, height: videoStream.height }
+            : null,
+          durationSeconds: Number.isFinite(duration) ? duration : null,
+          bitrate: Number.isFinite(bitrate) ? bitrate : null,
+          hasAudio
+        });
+      } catch (error) {
+        reject(new Error(`Could not parse ffprobe JSON: ${error.message}`));
+      }
+    });
+
+    proc.on('error', reject);
+  });
+}
+
+function parseIntegratedLoudness(stderr) {
+  const summaryMatch = stderr.match(/Integrated loudness:[\s\S]*?\bI:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i);
+  if (summaryMatch) return Number.parseFloat(summaryMatch[1]);
+
+  const lineMatches = [...stderr.matchAll(/\bI:\s*(-?\d+(?:\.\d+)?)\s*LUFS/gi)];
+  if (lineMatches.length === 0) return null;
+  return Number.parseFloat(lineMatches[lineMatches.length - 1][1]);
+}
+
+async function probeVideoLoudness(videoPath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-hide_banner',
+      '-nostats',
+      '-i', videoPath,
+      '-filter_complex', 'ebur128',
+      '-f', 'null',
+      '-'
+    ]);
+
+    let stderr = '';
+    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+
+    proc.on('close', () => {
+      resolve({ integrated: parseIntegratedLoudness(stderr) });
+    });
+
+    proc.on('error', reject);
+  });
+}
+
 async function extractLastFrame(videoPath) {
   return new Promise((resolve, reject) => {
     const buffers = [];
@@ -126,4 +199,11 @@ async function captureVideoFrame(videoPath, resultDir, baseName) {
   };
 }
 
-export { captureVideoFrame, isVideoFile, getVideoDimensions, VIDEO_EXTENSIONS };
+export {
+  captureVideoFrame,
+  isVideoFile,
+  getVideoDimensions,
+  getVideoMetadata,
+  probeVideoLoudness,
+  VIDEO_EXTENSIONS
+};
