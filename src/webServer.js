@@ -20,6 +20,10 @@ import { Job, FileInfo } from './jobs/Job.js';
 import { InMemoryJobStore } from './jobs/JobStore.js';
 import { LocalStorage } from './storage/LocalStorage.js';
 import { getCaptureConcurrency } from './config.js';
+import { ValidatorJob, ValidatorFileReport } from './validator/ValidatorJob.js';
+import { ValidatorStore } from './validator/ValidatorStore.js';
+import { getPreset, listPresets } from './validator/presets.js';
+import { runValidationForJob } from './validator/validatorService.js';
 
 export { parseCaptureConcurrency } from './config.js';
 
@@ -107,6 +111,7 @@ class Semaphore {
 const globalCap = new Semaphore(MAX_CONCURRENT);
 
 const jobStore = new InMemoryJobStore();
+const validatorStore = new ValidatorStore();
 
 function newId() {
   return crypto.randomUUID().slice(0, 8);
@@ -124,6 +129,20 @@ function createFileId(fileName, index) {
   const parsed = path.parse(fileName);
   const safeBase = sanitizeFileName(parsed.name) || 'file';
   return `${String(index + 1).padStart(3, '0')}-${safeBase}`;
+}
+
+function createValidatorFileId(fileName, index) {
+  return createFileId(fileName, index);
+}
+
+function validatorWorkRoot() {
+  return path.join(storage.root, 'validator');
+}
+
+function validatorFileType(fileName) {
+  if (/\.riv$/i.test(fileName)) return 'riv';
+  if (isVideoFile(fileName)) return 'video';
+  return 'zip';
 }
 
 function getFileWorkDir(job, file) {
@@ -180,6 +199,14 @@ function errorBody(message, code) {
 function assertOwnership(job, auth, res) {
   if (!job || !job.isOwnedBy(auth)) {
     res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+    return false;
+  }
+  return true;
+}
+
+function assertValidatorOwnership(job, auth, res) {
+  if (!job || !job.isOwnedBy(auth)) {
+    res.status(404).json(errorBody('Validator job not found', 'NOT_FOUND'));
     return false;
   }
   return true;
@@ -512,6 +539,114 @@ async function handleUpload(req, res) {
 
   const response = job.toJSON();
   res.status(201).json(response);
+}
+
+async function handleValidatorUpload(req, res) {
+  const files = req.files || [];
+  const auth = req.auth || {};
+
+  if (files.length === 0) {
+    metrics.increment('validator.upload.rejected', { reason: 'no_files' });
+    return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
+  }
+
+  const fileReports = files.map((file, index) => new ValidatorFileReport({
+    fileId: createValidatorFileId(file.originalname, index),
+    fileName: file.originalname,
+    fileType: validatorFileType(file.originalname),
+    path: file.path,
+    size: file.size,
+    status: 'pending'
+  }));
+
+  const job = new ValidatorJob({
+    id: req.sessionId,
+    userId: auth.userId || null,
+    tenantId: auth.tenantId || null,
+    clientId: auth.clientId || null,
+    preset: 'generic',
+    status: 'uploaded',
+    files: fileReports
+  });
+
+  await validatorStore.create(job);
+  metrics.increment('validator.upload.complete');
+  metrics.count('validator.upload.files', files.length);
+
+  res.status(201).json(job.toJSON());
+}
+
+async function handleValidatorStart(req, res) {
+  const job = await validatorStore.get(req.params.jobId);
+  const auth = req.auth || {};
+  const presetId = req.body?.preset || 'generic';
+
+  if (!assertValidatorOwnership(job, auth, res)) return;
+
+  try {
+    getPreset(presetId);
+  } catch {
+    metrics.increment('validator.start.rejected', { reason: 'invalid_preset' });
+    return res.status(400).json(errorBody('Invalid validator preset', 'INVALID_PRESET'));
+  }
+
+  if (job.status === 'validating') {
+    metrics.increment('validator.start.rejected', { reason: 'already_validating' });
+    return res.status(409).json(errorBody('Job is already validating', 'ALREADY_VALIDATING'));
+  }
+
+  job.preset = presetId;
+  job.error = null;
+  job.setStatus('validating');
+
+  for (const file of job.files) {
+    file.setStatus('pending');
+    file.findings = [];
+    file.metadata = {};
+  }
+
+  await validatorStore.update(job.id, {
+    preset: job.preset,
+    status: job.status,
+    updatedAt: job.updatedAt,
+    error: job.error,
+    files: job.files
+  });
+
+  res.json(job.toJSON());
+
+  runValidationForJob(job, { workRoot: validatorWorkRoot(job.id) })
+    .then(async (validatedJob) => {
+      await validatorStore.update(validatedJob.id, {
+        status: validatedJob.status,
+        updatedAt: validatedJob.updatedAt,
+        files: validatedJob.files,
+        error: validatedJob.error
+      });
+      metrics.increment('validator.complete');
+    })
+    .catch(async (error) => {
+      job.error = error.message;
+      job.setStatus('error');
+      await validatorStore.update(job.id, {
+        status: job.status,
+        updatedAt: job.updatedAt,
+        error: job.error,
+        files: job.files
+      });
+      metrics.increment('validator.failed');
+    });
+}
+
+async function handleValidatorGet(req, res) {
+  const job = await validatorStore.get(req.params.jobId);
+  if (!assertValidatorOwnership(job, req.auth, res)) return;
+
+  res.json(job.toJSON());
+}
+
+function handleValidatorPresets(req, res) {
+  res.json({ presets: listPresets() });
 }
 
 async function handleStartProcessing(req, res) {
@@ -849,6 +984,17 @@ export async function startWebServer(port = 3001, opts = {}) {
   // -----------------------------------------------------------------------
 
   const v1 = express.Router();
+
+  v1.get('/validator/presets', handleValidatorPresets);
+
+  v1.post('/validator/jobs', rateLimiter, (req, res, next) => {
+    req.sessionId = newId();
+    next();
+  }, upload.array('files'), handleValidatorUpload);
+
+  v1.post('/validator/jobs/:jobId/validate', rateLimiter, handleValidatorStart);
+
+  v1.get('/validator/jobs/:jobId', handleValidatorGet);
 
   v1.post('/jobs', rateLimiter, (req, res, next) => {
     req.sessionId = newId();
