@@ -4,6 +4,10 @@ import { summarizeFindings } from './findings.js';
 export const VALIDATOR_JOB_STATUSES = ['uploaded', 'validating', 'complete', 'error'];
 export const VALIDATOR_FILE_STATUSES = ['pending', 'validating', 'pass', 'warning', 'fail', 'error'];
 
+function copyData(value) {
+  return value == null ? value : structuredClone(value);
+}
+
 export class ValidatorFileReport {
   constructor(props = {}) {
     this.fileId = props.fileId || props.id || '';
@@ -12,13 +16,13 @@ export class ValidatorFileReport {
     this.path = props.path || null;
     this.size = props.size || 0;
     this.status = props.status || 'pending';
-    this.metadata = props.metadata || {};
-    this.findings = props.findings || [];
+    this.metadata = copyData(props.metadata || {});
+    this.findings = copyData(props.findings || []);
   }
 
   setFindings(findings) {
-    this.findings = findings;
-    this.status = summarizeFindings(findings).status;
+    this.findings = copyData(findings || []);
+    this.status = summarizeFindings(this.findings).status;
   }
 
   setStatus(status) {
@@ -36,8 +40,8 @@ export class ValidatorFileReport {
       fileType: this.fileType,
       size: this.size,
       status: this.status,
-      metadata: this.metadata,
-      findings: this.findings,
+      metadata: copyData(this.metadata),
+      findings: copyData(this.findings),
       summary
     };
   }

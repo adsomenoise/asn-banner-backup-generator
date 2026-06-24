@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { PRESETS, getPreset } from '../src/validator/presets.js';
+import { PRESETS, getPreset, listPresets } from '../src/validator/presets.js';
 import { buildFinding, summarizeFindings } from '../src/validator/findings.js';
 import { ValidatorJob, ValidatorFileReport } from '../src/validator/ValidatorJob.js';
 import { ValidatorStore } from '../src/validator/ValidatorStore.js';
@@ -21,6 +21,24 @@ describe('validator presets', () => {
 
   it('rejects unknown preset ids', () => {
     assert.throws(() => getPreset('unknown'), /Unknown validator preset/);
+  });
+
+  it('protects preset definitions from caller mutation', () => {
+    const generic = getPreset('generic');
+    generic.label = 'Changed';
+    generic.appliesTo.push('mutated');
+    generic.allowedExtensions.push('.exe');
+
+    assert.strictEqual(getPreset('generic').label, 'Generic QA');
+    assert.deepStrictEqual(getPreset('generic').appliesTo, ['zip', 'riv', 'video']);
+    assert.strictEqual(getPreset('generic').allowedExtensions.includes('.exe'), false);
+  });
+
+  it('returns preset list entries with defensive appliesTo copies', () => {
+    const [presetSummary] = listPresets();
+    presetSummary.appliesTo.push('mutated');
+
+    assert.strictEqual(listPresets()[0].appliesTo.includes('mutated'), false);
   });
 });
 
@@ -81,6 +99,29 @@ describe('validator job model', () => {
     assert.strictEqual(job.toJSON().files[0].findings.length, 0);
   });
 
+  it('copies file report metadata and findings across construction and serialization', () => {
+    const metadata = { width: 300 };
+    const findings = [
+      buildFinding('warning', 'EXTERNAL_REFERENCE', {
+        message: 'External asset references may be rejected.'
+      })
+    ];
+    const report = new ValidatorFileReport({ metadata, findings });
+
+    metadata.width = 728;
+    findings[0].severity = 'error';
+
+    assert.strictEqual(report.metadata.width, 300);
+    assert.strictEqual(report.findings[0].severity, 'warning');
+
+    const serialized = report.toJSON();
+    serialized.metadata.width = 970;
+    serialized.findings[0].severity = 'info';
+
+    assert.strictEqual(report.metadata.width, 300);
+    assert.strictEqual(report.findings[0].severity, 'warning');
+  });
+
   it('stores validator jobs independently', async () => {
     const store = new ValidatorStore();
     const job = new ValidatorJob({ id: 'v1', userId: 'alice' });
@@ -88,5 +129,23 @@ describe('validator job model', () => {
     assert.strictEqual((await store.get('v1')).id, 'v1');
     await store.update('v1', { status: 'complete' });
     assert.strictEqual((await store.get('v1')).status, 'complete');
+  });
+
+  it('refreshes updatedAt when stored jobs are updated', async () => {
+    const store = new ValidatorStore();
+    const originalUpdatedAt = '2000-01-01T00:00:00.000Z';
+    const job = new ValidatorJob({
+      id: 'v2',
+      userId: 'alice',
+      createdAt: originalUpdatedAt,
+      updatedAt: originalUpdatedAt
+    });
+
+    await store.create(job);
+    const updated = await store.update('v2', { status: 'complete' });
+
+    assert.strictEqual(updated.status, 'complete');
+    assert.notStrictEqual(updated.updatedAt, originalUpdatedAt);
+    assert.ok(Date.parse(updated.updatedAt) > Date.parse(originalUpdatedAt));
   });
 });

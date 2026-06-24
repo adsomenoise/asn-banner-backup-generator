@@ -23,6 +23,7 @@ export class ValidatorStore {
     const job = await this.get(id);
     if (!job) return null;
     Object.assign(job, updates);
+    job.updatedAt = new Date().toISOString();
     return job;
   }
 

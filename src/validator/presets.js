@@ -1,4 +1,20 @@
-export const PRESETS = {
+function freezePreset(preset) {
+  return Object.freeze({
+    ...preset,
+    appliesTo: Object.freeze([...preset.appliesTo]),
+    allowedExtensions: Object.freeze([...preset.allowedExtensions])
+  });
+}
+
+function copyPreset(preset) {
+  return {
+    ...preset,
+    appliesTo: [...preset.appliesTo],
+    allowedExtensions: [...preset.allowedExtensions]
+  };
+}
+
+const PRESET_DEFINITIONS = {
   generic: {
     id: 'generic',
     label: 'Generic QA',
@@ -67,12 +83,16 @@ export const PRESETS = {
   }
 };
 
+export const PRESETS = Object.freeze(
+  Object.fromEntries(Object.entries(PRESET_DEFINITIONS).map(([id, preset]) => [id, freezePreset(preset)]))
+);
+
 export function getPreset(id = 'generic') {
   const preset = PRESETS[id];
   if (!preset) throw new Error(`Unknown validator preset: ${id}`);
-  return preset;
+  return copyPreset(preset);
 }
 
 export function listPresets() {
-  return Object.values(PRESETS).map(({ id, label, appliesTo }) => ({ id, label, appliesTo }));
+  return Object.values(PRESETS).map(({ id, label, appliesTo }) => ({ id, label, appliesTo: [...appliesTo] }));
 }
