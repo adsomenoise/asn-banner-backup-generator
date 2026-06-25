@@ -36,7 +36,7 @@
     <p>Drop your creatives &rarr; get optimised JPG backup images</p>
   </div>
 
-  <div class="mode-switch" role="tablist" aria-label="Tool mode">
+  <div class="mode-switch hidden" id="modeSwitch" role="tablist" aria-label="Tool mode">
     <button class="mode-tab active" id="backupModeBtn" role="tab" aria-selected="true" aria-controls="backupPanel">Generate Backups</button>
     <button class="mode-tab" id="validatorModeBtn" role="tab" aria-selected="false" aria-controls="validatorPanel">Validate Ads</button>
   </div>
@@ -234,6 +234,7 @@ let completed = false;
 
 const backupModeBtn = document.getElementById('backupModeBtn');
 const validatorModeBtn = document.getElementById('validatorModeBtn');
+const modeSwitch = document.getElementById('modeSwitch');
 const backupPanel = document.getElementById('backupPanel');
 const validatorPanel = document.getElementById('validatorPanel');
 const dropZone = document.getElementById('dropZone');
@@ -376,6 +377,9 @@ window.showLoginDialog = showLoginDialog;
 window.closeLoginDialog = closeLoginDialog;
 window.showProcessingDialog = showProcessingDialog;
 window.closeProcessingDialog = closeProcessingDialog;
+window.isLocalhost = isLocalhost;
+
+initModeSwitch();
 
 const waitingMessages = [
   "Reticulating splines...",
@@ -521,6 +525,23 @@ function setMode(mode) {
   validatorModeBtn.classList.toggle('active', validator);
   backupModeBtn.setAttribute('aria-selected', String(!validator));
   validatorModeBtn.setAttribute('aria-selected', String(validator));
+}
+
+function isLocalhost(hostname = window.location.hostname) {
+  return hostname === 'localhost'
+    || hostname === '127.0.0.1'
+    || hostname === '::1'
+    || hostname.endsWith('.localhost');
+}
+
+function initModeSwitch() {
+  if (isLocalhost()) {
+    modeSwitch.classList.remove('hidden');
+    return;
+  }
+
+  modeSwitch.classList.add('hidden');
+  setMode('backup');
 }
 
 function setValidatorProgress(percent) {

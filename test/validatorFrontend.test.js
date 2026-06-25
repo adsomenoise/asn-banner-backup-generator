@@ -30,6 +30,7 @@ describe('Validator frontend UI', () => {
     const page = await browser.newPage();
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
 
+    assert.strictEqual(await page.locator('#modeSwitch').isVisible(), true);
     await page.click('#validatorModeBtn');
     await page.selectOption('#validatorPreset', 'generic');
     await page.setInputFiles('#validatorFileInput', {
@@ -55,6 +56,33 @@ describe('Validator frontend UI', () => {
     assert.strictEqual(await page.locator('#validatorProgressBar').getAttribute('aria-valuenow'), '100');
     assert.match(await page.locator('#validatorReport').textContent(), /The ZIP must contain at least one \.html file/);
     assert.match(await page.locator('#validatorReport').textContent(), /Add a root or shallow HTML entry point/);
+
+    await page.close();
+  });
+
+  it('hides validator mode controls on non-localhost domains', async () => {
+    const page = await browser.newPage();
+    const local = new URL(baseUrl);
+    await page.route('**/*', route => {
+      const requestUrl = new URL(route.request().url());
+      if (requestUrl.hostname !== 'production.example') {
+        return route.continue();
+      }
+      return route.fetch({
+        url: `${baseUrl}${requestUrl.pathname}${requestUrl.search}`,
+        headers: {
+          ...route.request().headers(),
+          host: local.host
+        }
+      }).then(response => route.fulfill({ response }));
+    });
+
+    await page.goto(`http://production.example:${local.port}/`, { waitUntil: 'domcontentloaded' });
+
+    assert.strictEqual(await page.evaluate(() => window.isLocalhost()), false);
+    assert.strictEqual(await page.locator('#modeSwitch').isVisible(), false);
+    assert.strictEqual(await page.locator('#backupPanel').isVisible(), true);
+    assert.strictEqual(await page.locator('#validatorPanel').isVisible(), false);
 
     await page.close();
   });
