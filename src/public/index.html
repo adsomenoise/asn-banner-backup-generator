@@ -36,39 +36,89 @@
     <p>Drop your creatives &rarr; get optimised JPG backup images</p>
   </div>
 
-  <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Upload ZIP or RIV files">
-    <div class="drop-zone-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-        <polyline points="17 8 12 3 7 8" />
-        <line x1="12" y1="3" x2="12" y2="15" />
-      </svg>
-    </div>
-    <div class="drop-zone-text">
-      <strong>Choose files</strong> or drag them here
-    </div>
-    <div class="drop-zone-hint">ZIP, .riv, or video &middot; multiple allowed</div>
+  <div class="mode-switch" role="tablist" aria-label="Tool mode">
+    <button class="mode-tab active" id="backupModeBtn" role="tab" aria-selected="true" aria-controls="backupPanel">Generate Backups</button>
+    <button class="mode-tab" id="validatorModeBtn" role="tab" aria-selected="false" aria-controls="validatorPanel">Validate Ads</button>
   </div>
-   <input type="file" id="fileInput" multiple accept=".zip,.riv,.mp4,.webm,.mov,.avi,.mkv,.flv,.wmv" hidden aria-hidden="true">
 
-  <div class="file-list" id="fileList" role="list" aria-label="Uploaded files"></div>
+  <div id="backupPanel" role="tabpanel" aria-labelledby="backupModeBtn">
+    <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Upload ZIP or RIV files">
+      <div class="drop-zone-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+      </div>
+      <div class="drop-zone-text">
+        <strong>Choose files</strong> or drag them here
+      </div>
+      <div class="drop-zone-hint">ZIP, .riv, or video &middot; multiple allowed</div>
+    </div>
+    <input type="file" id="fileInput" multiple accept=".zip,.riv,.mp4,.webm,.mov,.avi,.mkv,.flv,.wmv" hidden aria-hidden="true">
 
-  <div class="error-summary" id="errorSummary" role="alert"></div>
+    <div class="file-list" id="fileList" role="list" aria-label="Uploaded files"></div>
 
-  <div class="actions">
-    <div class="actions-col">
-      <div class="actions-row">
-        <button class="btn btn-primary" id="processBtn" disabled>Generate backups</button>
-        <button class="btn btn-success hidden" id="downloadBtn">Download ZIP</button>
-        <button class="btn btn-retry hidden" id="retryBtn">Retry failed</button>
-        <button class="btn btn-secondary hidden" id="resetBtn">Start over</button>
+    <div class="error-summary" id="errorSummary" role="alert"></div>
+
+    <div class="actions">
+      <div class="actions-col">
+        <div class="actions-row">
+          <button class="btn btn-primary" id="processBtn" disabled>Generate backups</button>
+          <button class="btn btn-success hidden" id="downloadBtn">Download ZIP</button>
+          <button class="btn btn-retry hidden" id="retryBtn">Retry failed</button>
+          <button class="btn btn-secondary hidden" id="resetBtn">Start over</button>
+        </div>
       </div>
     </div>
+
+    <div class="progress-wrap" id="progressWrap" role="status" aria-live="polite" aria-atomic="true">
+      <div class="progress-bar" id="progressBar" role="progressbar" aria-label="Overall processing progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-text" id="progressText"></div>
+    </div>
   </div>
 
-  <div class="progress-wrap" id="progressWrap" role="status" aria-live="polite">
-    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-    <div class="progress-text" id="progressText"></div>
+  <div id="validatorPanel" role="tabpanel" aria-labelledby="validatorModeBtn" class="hidden">
+    <div class="validator-toolbar">
+      <label for="validatorPreset">Validation preset</label>
+      <select id="validatorPreset">
+        <option value="generic">Generic QA</option>
+        <option value="cm360_dv360">CM360 / DV360</option>
+        <option value="google_ads">Google Ads</option>
+        <option value="amazon_ads">Amazon Ads</option>
+        <option value="rive">Rive</option>
+        <option value="video">Video</option>
+      </select>
+    </div>
+
+    <div class="drop-zone" id="validatorDropZone" role="button" tabindex="0" aria-label="Upload files to validate">
+      <div class="drop-zone-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+      </div>
+      <div class="drop-zone-text">
+        <strong>Choose files</strong> to validate
+      </div>
+      <div class="drop-zone-hint">ZIP, .riv, or video &middot; multiple allowed</div>
+    </div>
+    <input type="file" id="validatorFileInput" multiple accept=".zip,.riv,.mp4,.webm,.mov,.avi,.mkv,.flv,.wmv" hidden aria-hidden="true">
+
+    <div class="file-list" id="validatorFileList" role="list" aria-label="Files to validate"></div>
+
+    <div class="actions">
+      <button class="btn btn-primary" id="validateBtn" disabled>Validate ads</button>
+      <button class="btn btn-secondary hidden" id="validatorResetBtn">Start over</button>
+    </div>
+
+    <div class="progress-wrap" id="validatorProgressWrap" role="status" aria-live="polite" aria-atomic="true">
+      <div class="progress-bar" id="validatorProgressBar" role="progressbar" aria-label="Validation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-fill" id="validatorProgressFill"></div></div>
+      <div class="progress-text" id="validatorStatusText"></div>
+    </div>
+
+    <div class="validator-report" id="validatorReport" aria-live="polite"></div>
   </div>
 </div>
 
@@ -76,10 +126,10 @@
   <img src="animation.gif" alt="Processing..." aria-hidden="true">
   <div class="waiting-text" id="waitingText"></div>
   <div class="overlay-progress">
-    <div class="progress-bar"><div class="progress-fill" id="overlayProgressFill"></div></div>
-    <div class="progress-text" id="overlayProgressText">Starting...</div>
+    <div class="progress-bar" id="overlayProgressBar" role="progressbar" aria-label="Processing dialog progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-fill" id="overlayProgressFill"></div></div>
+    <div class="progress-text" id="overlayProgressText" aria-live="polite" aria-atomic="true">Starting...</div>
   </div>
-  <div class="overlay-files" id="overlayFiles"></div>
+  <div class="overlay-files" id="overlayFiles" role="list" aria-label="Processing file statuses"></div>
 </div>
 
 <script>
@@ -182,6 +232,10 @@ let sessionFiles = [];    // { id, name, type, state, error }
 let polling = false;
 let completed = false;
 
+const backupModeBtn = document.getElementById('backupModeBtn');
+const validatorModeBtn = document.getElementById('validatorModeBtn');
+const backupPanel = document.getElementById('backupPanel');
+const validatorPanel = document.getElementById('validatorPanel');
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const fileList = document.getElementById('fileList');
@@ -190,16 +244,33 @@ const downloadBtn = document.getElementById('downloadBtn');
 const retryBtn = document.getElementById('retryBtn');
 const resetBtn = document.getElementById('resetBtn');
 const progressWrap = document.getElementById('progressWrap');
+const progressBar = document.getElementById('progressBar');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const overlay = document.getElementById('overlay');
 const waitingText = document.getElementById('waitingText');
 const errorSummary = document.getElementById('errorSummary');
+const overlayProgressBar = document.getElementById('overlayProgressBar');
 const overlayProgressFill = document.getElementById('overlayProgressFill');
 const overlayProgressText = document.getElementById('overlayProgressText');
 const overlayFiles = document.getElementById('overlayFiles');
 const loginOverlay = document.getElementById('loginOverlay');
 const appContainer = document.querySelector('.container');
+const validatorPreset = document.getElementById('validatorPreset');
+const validatorDropZone = document.getElementById('validatorDropZone');
+const validatorFileInput = document.getElementById('validatorFileInput');
+const validatorFileList = document.getElementById('validatorFileList');
+const validateBtn = document.getElementById('validateBtn');
+const validatorResetBtn = document.getElementById('validatorResetBtn');
+const validatorProgressWrap = document.getElementById('validatorProgressWrap');
+const validatorProgressBar = document.getElementById('validatorProgressBar');
+const validatorProgressFill = document.getElementById('validatorProgressFill');
+const validatorStatusText = document.getElementById('validatorStatusText');
+const validatorReport = document.getElementById('validatorReport');
+
+let validatorJobId = null;
+let validatorFiles = [];
+let validatorPolling = false;
 
 let activeModal = null;
 
@@ -221,7 +292,11 @@ function setAppBackgroundInert(dialog, inert) {
   if (dialog === loginOverlay) {
     Array.from(appContainer.children)
       .filter(child => child !== loginOverlay)
-      .forEach(child => { child.inert = inert; });
+      .forEach(child => {
+        child.inert = inert;
+        child.querySelectorAll(FOCUSABLE_SELECTOR)
+          .forEach(focusable => { focusable.inert = inert; });
+      });
     return;
   }
 
@@ -347,6 +422,14 @@ dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classL
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
 dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFiles(e.dataTransfer.files); });
 fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+backupModeBtn.addEventListener('click', () => setMode('backup'));
+validatorModeBtn.addEventListener('click', () => setMode('validator'));
+validatorDropZone.addEventListener('click', () => validatorFileInput.click());
+validatorDropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); validatorFileInput.click(); } });
+validatorDropZone.addEventListener('dragover', e => { e.preventDefault(); validatorDropZone.classList.add('dragover'); });
+validatorDropZone.addEventListener('dragleave', () => validatorDropZone.classList.remove('dragover'));
+validatorDropZone.addEventListener('drop', e => { e.preventDefault(); validatorDropZone.classList.remove('dragover'); handleValidatorFiles(e.dataTransfer.files); });
+validatorFileInput.addEventListener('change', () => handleValidatorFiles(validatorFileInput.files));
 
 // ---------------------------------------------------------------------------
 // Error code → user-friendly message map
@@ -384,6 +467,74 @@ const ERROR_LABELS = {
 
 function friendlyErrorLabel(code) {
   return ERROR_LABELS[code] || ERROR_LABELS.UNKNOWN;
+}
+
+function plural(count, singular, pluralForm = `${singular}s`) {
+  return count === 1 ? singular : pluralForm;
+}
+
+function readableFileType(type) {
+  switch (type) {
+    case 'zip': return 'ZIP file';
+    case 'riv': return 'RIV file';
+    case 'video': return 'video file';
+    default: return `${type} file`;
+  }
+}
+
+function readableFileState(file) {
+  const state = file.state || 'uploaded';
+  if (state === 'complete') return 'done';
+  if (state === 'failed' && file.error) return `failed: ${file.error}`;
+  return state;
+}
+
+function fileStatusSummary(file) {
+  return `${file.name}, ${readableFileType(file.type)}, ${readableFileState(file)}`;
+}
+
+function setProgress(percent) {
+  const clamped = Math.max(0, Math.min(Math.round(percent), 100));
+  progressFill.style.width = `${clamped}%`;
+  overlayProgressFill.style.width = `${clamped}%`;
+  progressBar.setAttribute('aria-valuenow', String(clamped));
+  overlayProgressBar.setAttribute('aria-valuenow', String(clamped));
+}
+
+function readyMessage(count) {
+  return `${count} ${plural(count, 'file')} ready. Review file status, then generate backups.`;
+}
+
+function processingMessage(doneCount, total) {
+  return `Processing ${doneCount} of ${total} ${plural(total, 'file')}.`;
+}
+
+function completeMessage(successCount, failCount) {
+  return `Complete. ${successCount} ${plural(successCount, 'file')} succeeded, ${failCount} failed.`;
+}
+
+function setMode(mode) {
+  const validator = mode === 'validator';
+  backupPanel.classList.toggle('hidden', validator);
+  validatorPanel.classList.toggle('hidden', !validator);
+  backupModeBtn.classList.toggle('active', !validator);
+  validatorModeBtn.classList.toggle('active', validator);
+  backupModeBtn.setAttribute('aria-selected', String(!validator));
+  validatorModeBtn.setAttribute('aria-selected', String(validator));
+}
+
+function setValidatorProgress(percent) {
+  const clamped = Math.max(0, Math.min(Math.round(percent), 100));
+  validatorProgressFill.style.width = `${clamped}%`;
+  validatorProgressBar.setAttribute('aria-valuenow', String(clamped));
+}
+
+function validatorFileSummary(file) {
+  return `${file.fileName}, ${readableFileType(file.fileType)}, ${file.status}`;
+}
+
+function validationCompleteMessage(job) {
+  return `Validation complete. ${job.overall.errors} ${plural(job.overall.errors, 'error')} and ${job.overall.warnings} ${plural(job.overall.warnings, 'warning')}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +578,9 @@ function handleFiles(files) {
       }));
       sessionFiles = [...sessionFiles, ...mapped];
       renderFileList();
+      progressWrap.classList.add('visible');
+      setProgress(0);
+      progressText.textContent = readyMessage(sessionFiles.length);
       processBtn.disabled = false;
     })
     .catch(err => {
@@ -448,6 +602,7 @@ function renderFileList() {
     div.className = 'file-item';
     div.dataset.fileId = f.id;
     div.setAttribute('role', 'listitem');
+    div.setAttribute('aria-label', fileStatusSummary(f));
 
     div.innerHTML = `
       <div class="file-item-col">
@@ -491,6 +646,11 @@ function updateFileState(fileId, newState, errorMsg) {
     badge.className = 'state-badge ' + newState;
   }
 
+  const item = document.querySelector(`[data-file-id="${CSS.escape(fileId)}"]`);
+  if (item) {
+    item.setAttribute('aria-label', fileStatusSummary(f));
+  }
+
   if (newState === 'failed' && errorMsg) {
     showFileError(fileId, errorMsg);
   } else if (newState !== 'failed') {
@@ -507,6 +667,54 @@ function showFileError(fileId, msg) {
 function clearFileError(fileId) {
   const el = document.getElementById('err-' + fileId);
   if (el) el.textContent = '';
+}
+
+function renderValidatorFiles() {
+  validatorFileList.classList.add('visible');
+  validatorFileList.innerHTML = '';
+
+  validatorFiles.forEach(file => {
+    const div = document.createElement('div');
+    div.className = 'file-item validator-file-item';
+    div.setAttribute('role', 'listitem');
+    div.setAttribute('aria-label', validatorFileSummary(file));
+    div.innerHTML = `
+      <div class="file-item-col">
+        <div class="file-item-row">
+          <span class="file-type-badge ${escapeHtml(file.fileType)}">${escapeHtml(file.fileType)}</span>
+          <span class="file-name">${escapeHtml(file.fileName)}</span>
+        </div>
+      </div>
+      <span class="state-badge ${escapeHtml(file.status)}">${escapeHtml(file.status)}</span>
+    `;
+    validatorFileList.appendChild(div);
+  });
+}
+
+function renderValidatorReport(job) {
+  const fileReports = job.files.map(file => {
+    const findings = file.findings || [];
+    const findingItems = findings.map(finding => `
+      <div class="finding-group finding-${escapeHtml(finding.severity)}">
+        <div class="finding-title">${escapeHtml(finding.title)}</div>
+        <div class="finding-message">${escapeHtml(finding.message)}</div>
+        <div class="finding-suggestion">${escapeHtml(finding.suggestion)}</div>
+      </div>
+    `).join('');
+
+    return `
+      <section class="validator-file-report">
+        <h3>${escapeHtml(file.fileName)} · ${escapeHtml(file.status)}</h3>
+        ${findingItems || '<p class="progress-text">No findings.</p>'}
+      </section>
+    `;
+  }).join('');
+
+  validatorReport.innerHTML = `
+    <h2>Validation ${escapeHtml(job.overall.status)}</h2>
+    <p class="progress-text">Preset: ${escapeHtml(job.preset)}</p>
+    ${fileReports}
+  `;
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +757,127 @@ function showToast(message, type) {
 }
 
 // ---------------------------------------------------------------------------
+// Validator mode
+// ---------------------------------------------------------------------------
+
+function handleValidatorFiles(files) {
+  const accepted = Array.from(files).filter(f => /\.(zip|riv|mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(f.name));
+  if (accepted.length === 0) {
+    showToast('Only .zip, .riv, and video files are supported.', 'warn');
+    return;
+  }
+
+  const form = new FormData();
+  accepted.forEach(f => form.append('files', f));
+  validateBtn.disabled = true;
+  validatorResetBtn.classList.add('hidden');
+  validatorReport.innerHTML = '';
+  validatorStatusText.textContent = 'Uploading files for validation.';
+  validatorProgressWrap.classList.add('visible');
+  setValidatorProgress(0);
+
+  fetch('/api/v1/validator/jobs', { method: 'POST', body: form })
+    .then(r => {
+      if (!r.ok) return r.json().then(err => { throw new Error(err.error || 'Upload failed'); });
+      return r.json();
+    })
+    .then(job => {
+      validatorJobId = job.jobId;
+      validatorFiles = job.files;
+      renderValidatorFiles();
+      validatorStatusText.textContent = `${job.files.length} ${plural(job.files.length, 'file')} ready to validate.`;
+      validateBtn.disabled = false;
+    })
+    .catch(err => {
+      validatorStatusText.textContent = 'Upload failed.';
+      showToast(err.message, 'error');
+    });
+}
+
+validateBtn.addEventListener('click', startValidation);
+validatorResetBtn.addEventListener('click', resetValidatorUI);
+
+function startValidation() {
+  if (!validatorJobId) return;
+
+  validateBtn.disabled = true;
+  validatorResetBtn.classList.add('hidden');
+  validatorReport.innerHTML = '';
+  setValidatorProgress(0);
+  validatorStatusText.textContent = 'Starting validation.';
+
+  fetch(`/api/v1/validator/jobs/${validatorJobId}/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preset: validatorPreset.value })
+  })
+    .then(r => {
+      if (!r.ok) return r.json().then(err => { throw new Error(err.error || 'Validation failed'); });
+      return r.json();
+    })
+    .then(job => {
+      validatorFiles = job.files;
+      renderValidatorFiles();
+      validatorPolling = true;
+      pollValidationStatus();
+    })
+    .catch(err => {
+      validateBtn.disabled = false;
+      validatorStatusText.textContent = 'Validation failed to start.';
+      showToast(err.message, 'error');
+    });
+}
+
+async function pollValidationStatus() {
+  while (validatorPolling) {
+    try {
+      const res = await fetch(`/api/v1/validator/jobs/${validatorJobId}?_=${Date.now()}`);
+      const job = await res.json();
+
+      validatorFiles = job.files || [];
+      renderValidatorFiles();
+
+      const pct = job.progress && job.progress.total > 0 ? job.progress.completed / job.progress.total * 100 : 0;
+      setValidatorProgress(pct);
+      validatorStatusText.textContent = job.status === 'complete'
+        ? validationCompleteMessage(job)
+        : `Validating ${job.progress.completed} of ${job.progress.total} ${plural(job.progress.total, 'file')}.`;
+
+      if (job.status === 'complete' || job.status === 'error') {
+        validatorPolling = false;
+        setValidatorProgress(100);
+        validatorStatusText.textContent = job.status === 'complete'
+          ? validationCompleteMessage(job)
+          : 'Validation failed.';
+        renderValidatorReport(job);
+        validatorResetBtn.classList.remove('hidden');
+        validatorResetBtn.focus();
+        return;
+      }
+    } catch {
+      validatorStatusText.textContent = 'Validation status check failed, retrying.';
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
+
+function resetValidatorUI() {
+  validatorJobId = null;
+  validatorFiles = [];
+  validatorPolling = false;
+  validatorFileInput.value = '';
+  validatorFileList.innerHTML = '';
+  validatorFileList.classList.remove('visible');
+  validatorReport.innerHTML = '';
+  validatorProgressWrap.classList.remove('visible');
+  validatorStatusText.textContent = '';
+  setValidatorProgress(0);
+  validateBtn.disabled = true;
+  validatorResetBtn.classList.add('hidden');
+}
+
+// ---------------------------------------------------------------------------
 // Polling / status
 // ---------------------------------------------------------------------------
 
@@ -583,8 +912,8 @@ async function startProcessing() {
   overlayProgressText.textContent = 'Starting...';
   overlayFiles.innerHTML = '';
   progressWrap.classList.add('visible');
-  progressFill.style.width = '0%';
-  progressText.textContent = 'Starting...';
+  setProgress(0);
+  progressText.textContent = 'Starting processing.';
 
   sessionFiles.forEach(f => { if (f.state === 'uploaded') f.state = 'queued'; });
   renderFileList();
@@ -619,7 +948,7 @@ async function startRetry() {
   overlayProgressText.textContent = 'Retrying failed files...';
   overlayFiles.innerHTML = '';
   progressWrap.classList.add('visible');
-  progressFill.style.width = '0%';
+  setProgress(0);
   progressText.textContent = 'Retrying failed files...';
 
   const res = await fetch(`/api/v1/jobs/${sessionId}/retry`, { method: 'POST' });
@@ -658,12 +987,11 @@ async function pollStatus() {
       const done = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : 0;
       const total = data.progress ? data.progress.total : data.total;
       const pct = total > 0 ? (done / total * 100) : 0;
-      progressFill.style.width = Math.min(pct, 100) + '%';
-      overlayProgressFill.style.width = progressFill.style.width;
+      setProgress(pct);
 
       if (data.status === 'processing') {
         const doneCount = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : 0;
-        progressText.textContent = `Processing ${doneCount} of ${total}...`;
+        progressText.textContent = processingMessage(doneCount, total);
         overlayProgressText.textContent = progressText.textContent;
       }
 
@@ -671,7 +999,8 @@ async function pollStatus() {
         overlayFiles.innerHTML = data.files.map(sf => {
           const label = escapeHtml(sf.fileName);
           const dotClass = sf.state || 'queued';
-          return `<div class="overlay-file"><span class="status-dot ${dotClass}"></span><span class="file-label">${label}</span></div>`;
+          const status = escapeHtml(sf.state || 'queued');
+          return `<div class="overlay-file" role="listitem" aria-label="${label}, ${status}"><span class="status-dot ${dotClass}" aria-hidden="true"></span><span class="file-label">${label}</span><span class="sr-only">, ${status}</span></div>`;
         }).join('');
       }
 
@@ -679,19 +1008,16 @@ async function pollStatus() {
         completed = true;
         closeProcessingDialog({ restoreFocus: false });
         stopWaitingText();
-        progressFill.style.width = '100%';
+        setProgress(100);
 
         const successCount = data.files ? data.files.filter(f => f.state === 'complete').length : 0;
         const failCount = data.files ? data.files.filter(f => f.state === 'failed').length : 0;
+        progressText.textContent = completeMessage(successCount, failCount);
 
         if (failCount > 0 && successCount > 0) {
-          progressText.textContent = `Partial success — ${successCount} image(s) generated, ${failCount} failed`;
           showErrorSummary(`${failCount} file(s) failed. The download ZIP includes an errors.json with details.`);
         } else if (failCount > 0) {
-          progressText.textContent = `All ${failCount} file(s) failed`;
           showErrorSummary('All files failed. Check each file for the specific error.');
-        } else {
-          progressText.textContent = `Complete — ${successCount} image(s) generated`;
         }
 
         processBtn.classList.add('hidden');

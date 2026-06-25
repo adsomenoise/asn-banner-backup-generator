@@ -41,7 +41,7 @@ describe('Frontend processing UI', () => {
     await page.click('#processBtn');
 
     await page.waitForFunction(
-      () => document.querySelector('#progressText')?.textContent?.includes('All 1 file(s) failed'),
+      () => document.querySelector('#progressText')?.textContent?.includes('Complete. 0 files succeeded, 1 failed.'),
       { timeout: 10_000 }
     );
 
@@ -50,10 +50,57 @@ describe('Frontend processing UI', () => {
     const badgeText = await page.locator('.state-badge').textContent();
     const focusedElementId = await page.evaluate(() => document.activeElement.id);
 
-    assert.strictEqual(progressText, 'All 1 file(s) failed');
+    assert.strictEqual(progressText, 'Complete. 0 files succeeded, 1 failed.');
     assert.strictEqual(overlayClass, 'overlay');
     assert.match(badgeText, /failed/);
     assert.match(focusedElementId, /^(retryBtn|resetBtn)$/);
+
+    await page.close();
+  });
+
+  it('exposes progress and per-file status updates to assistive technology', async () => {
+    const page = await browser.newPage();
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+
+    await page.setInputFiles('#fileInput', {
+      name: 'broken.zip',
+      mimeType: 'application/zip',
+      buffer: zipWithoutHtml()
+    });
+
+    await page.waitForSelector('.file-item');
+
+    const overallProgress = page.locator('#progressBar');
+    const overlayProgress = page.locator('#overlayProgressBar');
+    assert.strictEqual(await overallProgress.getAttribute('role'), 'progressbar');
+    assert.strictEqual(await overallProgress.getAttribute('aria-label'), 'Overall processing progress');
+    assert.strictEqual(await overallProgress.getAttribute('aria-valuemin'), '0');
+    assert.strictEqual(await overallProgress.getAttribute('aria-valuemax'), '100');
+    assert.strictEqual(await overallProgress.getAttribute('aria-valuenow'), '0');
+    assert.strictEqual(await overlayProgress.getAttribute('role'), 'progressbar');
+    assert.strictEqual(await overlayProgress.getAttribute('aria-label'), 'Processing dialog progress');
+
+    assert.strictEqual(
+      await page.locator('.file-item').getAttribute('aria-label'),
+      'broken.zip, ZIP file, uploaded'
+    );
+    assert.strictEqual(
+      await page.locator('#progressText').textContent(),
+      '1 file ready. Review file status, then generate backups.'
+    );
+
+    await page.click('#processBtn');
+    await page.waitForFunction(
+      () => document.querySelector('#progressText')?.textContent?.includes('Complete. 0 files succeeded, 1 failed.'),
+      { timeout: 10_000 }
+    );
+
+    assert.strictEqual(await overallProgress.getAttribute('aria-valuenow'), '100');
+    assert.strictEqual(await overlayProgress.getAttribute('aria-valuenow'), '100');
+
+    const fileSummary = await page.locator('.file-item').getAttribute('aria-label');
+    assert.match(fileSummary, /^broken\.zip, ZIP file, failed:/);
+    assert.match(fileSummary, /The ZIP must contain at least one \.html file/);
 
     await page.close();
   });
