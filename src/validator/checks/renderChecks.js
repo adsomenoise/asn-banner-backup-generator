@@ -4,6 +4,8 @@ import { chromium } from 'playwright';
 import sharp from 'sharp';
 import { buildFinding } from '../findings.js';
 
+const DEFAULT_RENDER_SAMPLE_DELAY_MS = 2000;
+
 function isNearBlank(stats) {
   const colorChannels = stats.channels.slice(0, 3);
   const means = colorChannels.map(channel => channel.mean);
@@ -15,11 +17,17 @@ function isNearBlank(stats) {
   return isUniform && (isWhite || isBlack);
 }
 
-export async function checkRenderability({ htmlPath, dimensions, displayPath = null }) {
+export async function checkRenderability({
+  htmlPath,
+  dimensions,
+  displayPath = null,
+  sampleDelayMs = DEFAULT_RENDER_SAMPLE_DELAY_MS
+}) {
   const findings = [];
   const metadata = {
     rendered: false,
-    blank: null
+    blank: null,
+    sampleDelayMs
   };
   let browser = null;
 
@@ -35,6 +43,9 @@ export async function checkRenderability({ htmlPath, dimensions, displayPath = n
       waitUntil: 'load',
       timeout: 10000
     });
+    if (sampleDelayMs > 0) {
+      await page.waitForTimeout(sampleDelayMs);
+    }
     const screenshot = await page.screenshot({ type: 'png' });
     const stats = await sharp(screenshot).stats();
 
@@ -44,8 +55,8 @@ export async function checkRenderability({ htmlPath, dimensions, displayPath = n
     if (metadata.blank) {
       findings.push(buildFinding('warning', 'BLANK_RENDER', {
         title: 'Rendered creative appears blank',
-        message: 'The HTML loaded, but the captured image is nearly blank.',
-        suggestion: 'Check that required assets are included and the creative draws visible content immediately.',
+        message: `The HTML loaded, but the captured image is nearly blank after ${sampleDelayMs / 1000} seconds.`,
+        suggestion: 'Check that required assets are included and the creative draws visible content within the first few seconds.',
         path: displayPath
       }));
     }

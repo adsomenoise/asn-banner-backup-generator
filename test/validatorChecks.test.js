@@ -168,6 +168,29 @@ describe('validator render checks', () => {
     assert.ok(!codes(result.findings).includes('BLANK_RENDER'));
   });
 
+  it('waits before deciding an initially blank render is blank', async () => {
+    const htmlPath = path.join(TEST_TEMP, 'delayed-render.html');
+    await fs.writeFile(htmlPath, `
+      <!doctype html>
+      <body style="margin:0;background:#fff">
+        <script>
+          setTimeout(() => { document.body.style.background = '#f00'; }, 100);
+        </script>
+      </body>
+    `);
+
+    const result = await checkRenderability({
+      htmlPath,
+      dimensions: { width: 120, height: 80 },
+      displayPath: 'delayed-render.html',
+      sampleDelayMs: 250
+    });
+
+    assert.strictEqual(result.metadata.rendered, true);
+    assert.strictEqual(result.metadata.sampleDelayMs, 250);
+    assert.ok(!codes(result.findings).includes('BLANK_RENDER'));
+  });
+
   it('reports blank white HTML renders', async () => {
     const htmlPath = path.join(TEST_TEMP, 'blank.html');
     await fs.writeFile(htmlPath, '<!doctype html><style>body{margin:0;background:#fff}</style>');
@@ -179,6 +202,7 @@ describe('validator render checks', () => {
     });
 
     assert.strictEqual(result.metadata.rendered, true);
+    assert.strictEqual(result.metadata.sampleDelayMs, 2000);
     assert.strictEqual(result.metadata.blank, true);
     assert.ok(codes(result.findings).includes('BLANK_RENDER'));
   });
