@@ -13,10 +13,13 @@ describe('validator presets', () => {
       'generic',
       'google_ads',
       'rive',
-      'video'
+      'video',
+      'xandr'
     ]);
     assert.strictEqual(getPreset('generic').label, 'Generic QA');
     assert.strictEqual(getPreset('cm360_dv360').requiresClickTag, true);
+    assert.strictEqual(getPreset('xandr').requiresClickTag, true);
+    assert.deepStrictEqual(getPreset('xandr').appliesTo, ['zip']);
   });
 
   it('rejects unknown preset ids', () => {

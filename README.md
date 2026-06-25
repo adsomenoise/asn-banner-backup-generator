@@ -155,6 +155,7 @@ Initial presets:
 - CM360 / DV360
 - Google Ads
 - Amazon Ads
+- Xandr
 - Rive
 - Video
 

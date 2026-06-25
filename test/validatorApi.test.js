@@ -88,6 +88,19 @@ describe('Validator API', () => {
     assert.strictEqual(body.files[0].status, 'pending');
   });
 
+  it('lists Xandr as a validator preset', async () => {
+    const response = await fetch(`${base}/validator/presets`);
+    assert.strictEqual(response.status, 200);
+    const body = await json(response);
+
+    const xandr = body.presets.find(preset => preset.id === 'xandr');
+    assert.deepStrictEqual(xandr, {
+      id: 'xandr',
+      label: 'Xandr',
+      appliesTo: ['zip']
+    });
+  });
+
   it('validates a job and stores failing findings', async () => {
     const badZip = zipBuffer([
       { name: 'asset.txt', content: 'not a banner' }

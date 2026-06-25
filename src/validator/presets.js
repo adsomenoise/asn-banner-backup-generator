@@ -59,6 +59,17 @@ const PRESET_DEFINITIONS = {
     allowedExtensions: ['.html', '.htm', '.js', '.css', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.json', '.woff', '.woff2', '.ttf'],
     maxVideoDurationSeconds: null
   },
+  xandr: {
+    id: 'xandr',
+    label: 'Xandr',
+    appliesTo: ['zip'],
+    maxUploadBytes: 200 * 1024 * 1024,
+    requiresHtml: true,
+    requiresClickTag: true,
+    allowExternalReferences: false,
+    allowedExtensions: ['.html', '.htm', '.js', '.css', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.json', '.woff', '.woff2', '.ttf'],
+    maxVideoDurationSeconds: null
+  },
   rive: {
     id: 'rive',
     label: 'Rive',

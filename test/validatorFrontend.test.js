@@ -32,6 +32,7 @@ describe('Validator frontend UI', () => {
 
     assert.strictEqual(await page.locator('#modeSwitch').isVisible(), true);
     await page.click('#validatorModeBtn');
+    assert.strictEqual(await page.locator('#validatorPreset option[value="xandr"]').textContent(), 'Xandr');
     await page.selectOption('#validatorPreset', 'generic');
     await page.setInputFiles('#validatorFileInput', {
       name: 'broken.zip',
