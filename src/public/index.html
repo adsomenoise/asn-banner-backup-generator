@@ -727,21 +727,165 @@ function renderValidatorFiles() {
   });
 }
 
-function renderValidatorReport(job) {
-  const fileReports = job.files.map(file => {
-    const findings = file.findings || [];
-    const findingItems = findings.map(finding => `
-      <div class="finding-group finding-${escapeHtml(finding.severity)}">
-        <div class="finding-title">${escapeHtml(finding.title)}</div>
+const VALIDATOR_CHECKS = [
+  {
+    id: 'package-size',
+    appliesTo: ['zip'],
+    label: 'Package size',
+    pass: 'Package size is within the selected preset limit.',
+    codes: ['PACKAGE_TOO_LARGE']
+  },
+  {
+    id: 'zip-extraction',
+    appliesTo: ['zip'],
+    label: 'ZIP extraction',
+    pass: 'ZIP structure was readable and extracted safely.',
+    codes: ['ZIP_EXTRACTION_FAILED']
+  },
+  {
+    id: 'html-entry',
+    appliesTo: ['zip'],
+    label: 'HTML entry',
+    pass: 'An HTML entry point was found.',
+    codes: ['MISSING_HTML']
+  },
+  {
+    id: 'dimensions',
+    appliesTo: ['zip', 'video', 'riv'],
+    label: 'Dimensions',
+    pass: 'Creative dimensions were detected.',
+    codes: ['VIDEO_DIMENSIONS_MISSING', 'RIVE_DIMENSIONS_MISSING']
+  },
+  {
+    id: 'renderability',
+    appliesTo: ['zip'],
+    label: 'Render smoke check',
+    pass: 'The HTML rendered without fatal browser errors.',
+    codes: ['RENDER_FAILED', 'BLANK_RENDER']
+  },
+  {
+    id: 'clicktag',
+    appliesTo: ['zip'],
+    label: 'clickTag',
+    pass: 'Required clickTag handling is present or not required for this preset.',
+    codes: ['MISSING_CLICKTAG']
+  },
+  {
+    id: 'external-references',
+    appliesTo: ['zip'],
+    label: 'External references',
+    pass: 'No disallowed external asset references were detected.',
+    codes: ['EXTERNAL_REFERENCE']
+  },
+  {
+    id: 'file-types',
+    appliesTo: ['zip', 'video', 'riv'],
+    label: 'Allowed file types',
+    pass: 'All checked files match the selected preset and supported extensions.',
+    codes: ['UNSUPPORTED_FILE_TYPE', 'PRESET_FILE_TYPE_MISMATCH']
+  },
+  {
+    id: 'rive-wrapper',
+    appliesTo: ['riv'],
+    label: 'Rive wrapper',
+    pass: 'Rive wrapper HTML can be generated.',
+    codes: ['RIVE_WRAPPER_FAILED']
+  },
+  {
+    id: 'video-probe',
+    appliesTo: ['video'],
+    label: 'Video probe',
+    pass: 'Video metadata was readable.',
+    codes: ['VIDEO_PROBE_FAILED']
+  },
+  {
+    id: 'video-duration',
+    appliesTo: ['video'],
+    label: 'Video duration',
+    pass: 'Video duration is within the selected preset limit.',
+    codes: ['VIDEO_DURATION_LONG']
+  },
+  {
+    id: 'video-bitrate',
+    appliesTo: ['video'],
+    label: 'Video bitrate',
+    pass: 'Video bitrate is within the validator threshold.',
+    codes: ['VIDEO_BITRATE_HIGH']
+  },
+  {
+    id: 'video-audio',
+    appliesTo: ['video'],
+    label: 'Audio stream',
+    pass: 'No audio stream was detected.',
+    codes: ['VIDEO_HAS_AUDIO']
+  },
+  {
+    id: 'video-loudness',
+    appliesTo: ['video'],
+    label: 'Audio loudness',
+    pass: 'Audio loudness is within the validator threshold or not applicable.',
+    codes: ['VIDEO_LOUDNESS_HIGH']
+  },
+  {
+    id: 'validation-runtime',
+    appliesTo: ['zip', 'video', 'riv'],
+    label: 'Validation runtime',
+    pass: 'The validator completed without an unexpected runtime error.',
+    codes: ['VALIDATION_ERROR']
+  }
+];
+
+function checkStatusFromFindings(findings) {
+  if (findings.some(finding => finding.severity === 'error')) return 'fail';
+  if (findings.some(finding => finding.severity === 'warning' || finding.severity === 'info')) return 'warning';
+  return 'pass';
+}
+
+function buildCheckRows(file) {
+  const findings = file.findings || [];
+  return VALIDATOR_CHECKS
+    .filter(check => check.appliesTo.includes(file.fileType))
+    .map(check => {
+      const matchedFindings = findings.filter(finding => check.codes.includes(finding.code));
+      return {
+        ...check,
+        status: checkStatusFromFindings(matchedFindings),
+        findings: matchedFindings
+      };
+    });
+}
+
+function renderCheckRow(check) {
+  const details = check.findings.length > 0
+    ? check.findings.map(finding => `
+      <div class="finding-detail">
         <div class="finding-message">${escapeHtml(finding.message)}</div>
         <div class="finding-suggestion">${escapeHtml(finding.suggestion)}</div>
       </div>
-    `).join('');
+    `).join('')
+    : `<div class="finding-message">${escapeHtml(check.pass)}</div>`;
+
+  return `
+    <div class="check-row check-${escapeHtml(check.status)}">
+      <span class="check-status ${escapeHtml(check.status)}">${escapeHtml(check.status)}</span>
+      <div class="check-body">
+        <div class="finding-title">${escapeHtml(check.label)}</div>
+        ${details}
+      </div>
+    </div>
+  `;
+}
+
+function renderValidatorReport(job) {
+  const fileReports = job.files.map(file => {
+    const checkItems = buildCheckRows(file).map(renderCheckRow).join('');
 
     return `
       <section class="validator-file-report">
         <h3>${escapeHtml(file.fileName)} · ${escapeHtml(file.status)}</h3>
-        ${findingItems || '<p class="progress-text">No findings.</p>'}
+        <div class="check-list" role="list" aria-label="Checks performed for ${escapeHtml(file.fileName)}">
+          ${checkItems}
+        </div>
       </section>
     `;
   }).join('');

@@ -282,10 +282,32 @@ body {
 .validator-file-report h3 {
   font-size: 0.9375rem; font-weight: 700; color: var(--text-heading);
 }
-.finding-group {
-  margin-top: 0.75rem; padding: 0.75rem;
-  border: 1px solid var(--border); border-radius: 8px;
+.check-list {
+  margin-top: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem;
+}
+.check-row {
+  display: flex; align-items: flex-start; gap: 0.75rem;
+  padding: 0.75rem; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg-card);
+}
+.check-status {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 64px; padding: 2px 8px; border-radius: 999px;
+  font-size: 0.6875rem; font-weight: 700; text-transform: uppercase;
+  line-height: 1.5; flex-shrink: 0;
+}
+.check-status.pass { background: #0c3623; color: var(--state-done); }
+.check-status.warning { background: #3b3410; color: var(--state-processing); }
+.check-status.fail { background: #3b1515; color: var(--state-failed); }
+.check-body { flex: 1; min-width: 0; }
+.finding-detail + .finding-detail {
+  margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border);
+}
+
+@media (prefers-color-scheme: light) {
+  .check-status.pass { background: #d1fae5; color: var(--state-done); }
+  .check-status.warning { background: #fef3c7; color: var(--state-processing); }
+  .check-status.fail { background: #fee2e2; color: var(--state-failed); }
 }
 .finding-title {
   font-size: 0.875rem; font-weight: 700; color: var(--text-heading);

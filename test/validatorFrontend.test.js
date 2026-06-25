@@ -48,7 +48,7 @@ describe('Validator frontend UI', () => {
 
     await page.click('#validateBtn');
     await page.waitForFunction(
-      () => document.querySelector('#validatorReport')?.textContent?.includes('Missing HTML entry'),
+      () => document.querySelector('#validatorReport')?.textContent?.includes('HTML entry'),
       { timeout: 10_000 }
     );
 
@@ -56,6 +56,18 @@ describe('Validator frontend UI', () => {
     assert.strictEqual(await page.locator('#validatorProgressBar').getAttribute('aria-valuenow'), '100');
     assert.match(await page.locator('#validatorReport').textContent(), /The ZIP must contain at least one \.html file/);
     assert.match(await page.locator('#validatorReport').textContent(), /Add a root or shallow HTML entry point/);
+    assert.ok(await page.locator('.check-row').count() >= 8);
+
+    const checkRows = await page.locator('.check-row').evaluateAll(rows => rows.map(row => ({
+      status: row.querySelector('.check-status')?.textContent?.trim(),
+      text: row.textContent
+    })));
+
+    assert.ok(checkRows.some(row => row.status === 'pass' && row.text.includes('Package size')));
+    assert.ok(checkRows.some(row => row.status === 'pass' && row.text.includes('ZIP extraction')));
+    assert.ok(checkRows.some(row => row.status === 'warning' && row.text.includes('Allowed file types')));
+    assert.ok(checkRows.some(row => row.status === 'fail' && row.text.includes('HTML entry')));
+    assert.ok(checkRows.some(row => row.text.includes('Remove unsupported files or choose a preset')));
 
     await page.close();
   });
