@@ -136,13 +136,38 @@ The default is `3`. Invalid values fall back to `3`; values above `8` are capped
 
 1. **Drop files** onto the drop zone (`.zip` or `.riv`, multiple allowed).
 2. Each file appears in the list with a state badge: `uploaded` → `queued` → `processing` (with spinner) → `done` or `failed`.
-3. Click **Generate backups** to start processing. An overlay with an animation GIF and cycling messages appears.
-4. On completion:
+3. The progress region announces how many files are ready, then exposes processing progress with real `progressbar` semantics during generation.
+4. Click **Generate backups** to start processing. An overlay with an animation GIF, cycling messages, accessible progress, and per-file status updates appears.
+5. On completion:
    - **Success**: files show a green checkmark.
    - **Failure**: files show a red cross with an inline explanation (e.g. missing dimensions, no HTML found).
    - **Partial success**: download button still appears for successful files; a **Retry failed** button lets you re-process only the failed ones.
    - **Start over** resets everything.
-5. Click **Download ZIP** to get a single archive containing: JPGs for successful files, nested per-creative ZIPs (`.html` + `.js`) for `.riv` files, and `errors.json` if any file failed.
+6. Click **Download ZIP** to get a single archive containing: JPGs for successful files, nested per-creative ZIPs (`.html` + `.js`) for `.riv` files, and `errors.json` if any file failed.
+
+### Ad Validator
+
+The web UI includes a separate **Validate Ads** mode. It accepts `.zip`, `.riv`, and supported video files, runs a selected validation preset, and renders a report without generating backup JPGs.
+
+Initial presets:
+
+- Generic QA
+- CM360 / DV360
+- Google Ads
+- Amazon Ads
+- Rive
+- Video
+
+Validator reports include an overall `pass`, `warning`, or `fail` result, per-file findings grouped by severity, detected metadata, and suggested fixes such as adding a missing HTML entry point, renaming unsafe files, bundling external assets, or re-encoding oversized video.
+
+### Accessibility
+
+- The upload target is keyboard-operable and exposes a button role for assistive technologies.
+- Login and processing dialogs move focus into the modal, keep keyboard focus inside while open, mark the background inert, and restore focus when closed.
+- Overall and modal processing bars use `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, and dynamic `aria-valuenow` values.
+- Status regions use polite live announcements for ready, processing, and completion states (for example: `Complete. 0 files succeeded, 1 failed.`).
+- Each uploaded file row exposes an accessible summary such as `banner.zip, ZIP file, processing` or `layout.zip, ZIP file, failed: The ZIP must contain at least one .html file.`
+- Overlay file statuses include screen-reader text in addition to visual status dots.
 
 ## API Reference
 
@@ -158,6 +183,10 @@ All API endpoints are versioned under `/api/v1/`. Legacy `/api/` routes remain a
 | `GET` | `/api/v1/jobs/{jobId}` | Get job status with per-file details |
 | `GET` | `/api/v1/jobs/{jobId}/files` | Get per-file details only |
 | `GET` | `/api/v1/jobs/{jobId}/download` | Download result ZIP |
+| `GET` | `/api/v1/validator/presets` | List validator presets |
+| `POST` | `/api/v1/validator/jobs` | Create a validator job and upload files |
+| `POST` | `/api/v1/validator/jobs/{jobId}/validate` | Start validation for a selected preset |
+| `GET` | `/api/v1/validator/jobs/{jobId}` | Get validator status and report |
 
 ---
 
@@ -767,7 +796,7 @@ npm test            # Run all tests
 npm run test:watch  # Re-run on file changes
 ```
 
-Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/browserPool.test.js`, `test/concurrencyConfig.test.js`, `test/frontendUi.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`, `test/security.test.js`, `test/observability.test.js`.
+Test files: `test/utils.test.js`, `test/riveTemplate.test.js`, `test/extractZip.test.js`, `test/findBannerEntry.test.js`, `test/captureBackup.test.js`, `test/browserPool.test.js`, `test/concurrencyConfig.test.js`, `test/frontendUi.test.js`, `test/validatorModel.test.js`, `test/validatorChecks.test.js`, `test/validatorService.test.js`, `test/validatorApi.test.js`, `test/validatorFrontend.test.js`, `test/apiContract.test.js`, `test/auth.test.js`, `test/jobs.test.js`, `test/storage.test.js`, `test/security.test.js`, `test/observability.test.js`.
 
 Tests cover:
 - ZIP path-traversal safety (`isPathSafe`)
@@ -779,7 +808,8 @@ Tests cover:
 - Output file deduplication
 - Playwright navigation error resilience, backup contract fast path, and fallback end-frame timing
 - Browser pool reuse and capture concurrency configuration
-- Frontend polling behavior for digit-prefixed file IDs
+- Frontend polling behavior, modal focus management, accessible progress semantics, live status text, and per-file accessible status summaries
+- Validator model, check modules, orchestration, API, and frontend report behavior
 - API v1 contract: 22 HTTP tests for health, upload, process, status, files, download, error shapes, legacy aliases
 - Auth integration: 33 tests for adapter unit, production 401, own-job access, cross-user 404, tenant isolation, health bypass, legacy auth
 - Job model + store: 48 tests for FileInfo, Job transitions/ownership/toJSON, InMemoryJobStore CRUD/lifecycle
