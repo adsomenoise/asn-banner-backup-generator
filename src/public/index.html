@@ -537,6 +537,21 @@ function validationCompleteMessage(job) {
   return `Validation complete. ${job.overall.errors} ${plural(job.overall.errors, 'error')} and ${job.overall.warnings} ${plural(job.overall.warnings, 'warning')}.`;
 }
 
+async function parseApiResponse(response, fallbackMessage) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    await response.text();
+    throw new Error('The server returned HTML instead of validator API JSON. Check that the deployed backend includes the validator routes.');
+  }
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error || fallbackMessage);
+  }
+
+  return body;
+}
+
 // ---------------------------------------------------------------------------
 // File handling
 // ---------------------------------------------------------------------------
@@ -777,10 +792,7 @@ function handleValidatorFiles(files) {
   setValidatorProgress(0);
 
   fetch('/api/v1/validator/jobs', { method: 'POST', body: form })
-    .then(r => {
-      if (!r.ok) return r.json().then(err => { throw new Error(err.error || 'Upload failed'); });
-      return r.json();
-    })
+    .then(r => parseApiResponse(r, 'Upload failed'))
     .then(job => {
       validatorJobId = job.jobId;
       validatorFiles = job.files;
@@ -811,10 +823,7 @@ function startValidation() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ preset: validatorPreset.value })
   })
-    .then(r => {
-      if (!r.ok) return r.json().then(err => { throw new Error(err.error || 'Validation failed'); });
-      return r.json();
-    })
+    .then(r => parseApiResponse(r, 'Validation failed'))
     .then(job => {
       validatorFiles = job.files;
       renderValidatorFiles();
@@ -832,7 +841,7 @@ async function pollValidationStatus() {
   while (validatorPolling) {
     try {
       const res = await fetch(`/api/v1/validator/jobs/${validatorJobId}?_=${Date.now()}`);
-      const job = await res.json();
+      const job = await parseApiResponse(res, 'Validation status check failed');
 
       validatorFiles = job.files || [];
       renderValidatorFiles();

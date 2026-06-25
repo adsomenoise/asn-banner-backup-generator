@@ -58,4 +58,33 @@ describe('Validator frontend UI', () => {
 
     await page.close();
   });
+
+  it('shows a clear error when validator upload returns HTML instead of JSON', async () => {
+    const page = await browser.newPage();
+    await page.route('**/api/v1/validator/jobs', route => {
+      route.fulfill({
+        status: 404,
+        contentType: 'text/html',
+        body: '<!DOCTYPE html><title>Not found</title>'
+      });
+    });
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+
+    await page.click('#validatorModeBtn');
+    await page.setInputFiles('#validatorFileInput', {
+      name: 'broken.zip',
+      mimeType: 'application/zip',
+      buffer: zipWithoutHtml()
+    });
+
+    await page.waitForFunction(
+      () => document.querySelector('#validatorStatusText')?.textContent === 'Upload failed.'
+    );
+
+    const toastText = await page.locator('.toast').textContent();
+    assert.match(toastText, /server returned HTML instead of validator API JSON/);
+    assert.doesNotMatch(toastText, /Unexpected token/);
+
+    await page.close();
+  });
 });
