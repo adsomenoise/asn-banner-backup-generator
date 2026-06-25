@@ -137,8 +137,8 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     } catch {
       findings.push(buildFinding('error', 'MISSING_HTML', {
         title: 'Missing HTML entry',
-        message: 'This ZIP does not contain an HTML entry file.',
-        suggestion: 'Add an index.html file at the root of the ZIP or include a valid HTML banner entry.',
+        message: 'The ZIP must contain at least one .html file.',
+        suggestion: 'Add a root or shallow HTML entry point and re-upload the ZIP.',
         path: fileName
       }));
       return { metadata, findings };
