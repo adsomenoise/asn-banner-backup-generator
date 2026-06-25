@@ -112,6 +112,7 @@ const globalCap = new Semaphore(MAX_CONCURRENT);
 
 const jobStore = new InMemoryJobStore();
 const validatorStore = new ValidatorStore();
+const validatorCleanupInProgress = new Set();
 
 function newId() {
   return crypto.randomUUID().slice(0, 8);
@@ -288,19 +289,25 @@ function pruneStaleSessions() {
 
 async function cleanupValidatorJob(job) {
   if (!isStaleTerminalValidatorJob(job)) return;
+  if (validatorCleanupInProgress.has(job.id)) return;
 
-  const currentJob = await validatorStore.get(job.id);
-  if (!currentJob || !isStaleTerminalValidatorJob(currentJob)) return;
+  validatorCleanupInProgress.add(job.id);
+  try {
+    const currentJob = await validatorStore.get(job.id);
+    if (!currentJob || !isStaleTerminalValidatorJob(currentJob)) return;
 
-  await Promise.all([
-    ...currentJob.files.map(file => file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()),
-    storage.cleanupJob(currentJob.id),
-    rmdir(validatorJobWorkRoot(currentJob.id))
-  ]);
+    await Promise.all([
+      ...currentJob.files.map(file => file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()),
+      storage.cleanupJob(currentJob.id),
+      rmdir(validatorJobWorkRoot(currentJob.id))
+    ]);
 
-  const deletableJob = await validatorStore.get(currentJob.id);
-  if (!deletableJob || !isStaleTerminalValidatorJob(deletableJob)) return;
-  await validatorStore.delete(deletableJob.id);
+    const deletableJob = await validatorStore.get(currentJob.id);
+    if (!deletableJob || !isStaleTerminalValidatorJob(deletableJob)) return;
+    await validatorStore.delete(deletableJob.id);
+  } finally {
+    validatorCleanupInProgress.delete(job.id);
+  }
 }
 
 async function processJob(jobId) {
@@ -636,6 +643,11 @@ async function handleValidatorStart(req, res) {
   if (job.status === 'validating') {
     metrics.increment('validator.start.rejected', { reason: 'already_validating' });
     return res.status(409).json(errorBody('Job is already validating', 'ALREADY_VALIDATING'));
+  }
+
+  if (validatorCleanupInProgress.has(job.id)) {
+    metrics.increment('validator.start.rejected', { reason: 'cleanup_in_progress' });
+    return res.status(409).json(errorBody('Validator job is being cleaned up', 'CLEANUP_IN_PROGRESS'));
   }
 
   job.preset = presetId;
