@@ -5,7 +5,7 @@ import fs from 'fs-extra';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import AdmZip from 'adm-zip';
-import { extractZip } from './extractZip.js';
+import { extractZip, isContainerZip, expandContainerZip } from './extractZip.js';
 import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
 import { captureBackup } from './captureBackup.js';
@@ -564,7 +564,32 @@ async function handleUpload(req, res) {
     }
   }
 
-  const fileInfos = files.map((f, index) => new FileInfo({
+  // Expand container ZIPs (a ZIP containing inner ZIP files, no HTML) into individual entries.
+  // Each inner ZIP is magic-byte validated inside expandContainerZip before being written.
+  let allFiles = [];
+  for (const f of files) {
+    if (/\.zip$/i.test(f.originalname) && isContainerZip(f.path)) {
+      const inner = await expandContainerZip(f.path, path.dirname(f.path), { maxInner: MAX_UPLOAD_FILES });
+      if (inner.length > 0) {
+        log.info('Expanded container ZIP', { fileName: f.originalname, innerCount: inner.length });
+        metrics.increment('upload.container_zip_expanded');
+        allFiles.push(...inner.map(i => ({ originalname: i.name, path: i.path, size: i.size })));
+        await fs.remove(f.path).catch(() => {});
+        continue;
+      }
+    }
+    allFiles.push(f);
+  }
+
+  if (allFiles.length > MAX_UPLOAD_FILES) {
+    await Promise.all(allFiles.map(f => fs.remove(f.path).catch(() => {})));
+    return res.status(400).json(errorBody(
+      `Batch ZIP expansion resulted in ${allFiles.length} files (max ${MAX_UPLOAD_FILES})`,
+      'TOO_MANY_FILES'
+    ));
+  }
+
+  const fileInfos = allFiles.map((f, index) => new FileInfo({
     id: createFileId(f.originalname, index),
     name: f.originalname,
     path: f.path,
@@ -585,10 +610,10 @@ async function handleUpload(req, res) {
   const uploadDuration = Date.now() - uploadStart;
   metrics.increment('upload.complete');
   metrics.timing('upload.duration', uploadDuration);
-  metrics.count('upload.files', files.length);
+  metrics.count('upload.files', allFiles.length);
   log.info('Upload complete', {
     jobId: job.id,
-    fileCount: files.length,
+    fileCount: allFiles.length,
     duration: uploadDuration
   });
 

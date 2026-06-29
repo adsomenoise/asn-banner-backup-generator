@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'fs-extra';
 import path from 'path';
 import AdmZip from 'adm-zip';
-import { extractZip, isPathSafe } from '../src/extractZip.js';
+import { extractZip, isPathSafe, isContainerZip, expandContainerZip } from '../src/extractZip.js';
 
 const TEST_TEMP = path.resolve('test-temp-extract');
 
@@ -132,5 +132,164 @@ describe('extractZip — extraction', () => {
     );
 
     await fs.remove(zipPath);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+
+function makeInnerZip(htmlContent = '<html></html>') {
+  const inner = new AdmZip();
+  inner.addFile('index.html', Buffer.from(htmlContent));
+  return inner.toBuffer();
+}
+
+// A valid inner ZIP buffer (has ZIP magic bytes)
+function validInnerZipBuffer(name = 'index.html') {
+  const inner = new AdmZip();
+  inner.addFile(name, Buffer.from('content'));
+  return inner.toBuffer();
+}
+
+// ---------------------------------------------------------------------------
+// isContainerZip
+// ---------------------------------------------------------------------------
+
+describe('isContainerZip', () => {
+  it('returns true for a ZIP containing only inner ZIPs', async () => {
+    const outer = new AdmZip();
+    outer.addFile('300x250.zip', validInnerZipBuffer());
+    outer.addFile('728x90.zip', validInnerZipBuffer());
+    const outerPath = path.join(TEST_TEMP, 'container.zip');
+    await fs.writeFile(outerPath, outer.toBuffer());
+
+    assert.strictEqual(isContainerZip(outerPath), true);
+    await fs.remove(outerPath);
+  });
+
+  it('returns false for a regular banner ZIP (has HTML)', async () => {
+    const zip = new AdmZip();
+    zip.addFile('index.html', Buffer.from('<html></html>'));
+    zip.addFile('style.css', Buffer.from('body{}'));
+    const zipPath = path.join(TEST_TEMP, 'banner.zip');
+    await fs.writeFile(zipPath, zip.toBuffer());
+
+    assert.strictEqual(isContainerZip(zipPath), false);
+    await fs.remove(zipPath);
+  });
+
+  it('returns false for a ZIP with both HTML and inner ZIPs', async () => {
+    const zip = new AdmZip();
+    zip.addFile('index.html', Buffer.from('<html></html>'));
+    zip.addFile('asset.zip', validInnerZipBuffer());
+    const zipPath = path.join(TEST_TEMP, 'mixed.zip');
+    await fs.writeFile(zipPath, zip.toBuffer());
+
+    assert.strictEqual(isContainerZip(zipPath), false);
+    await fs.remove(zipPath);
+  });
+
+  it('returns false for a ZIP with no inner ZIPs', async () => {
+    const zip = new AdmZip();
+    zip.addFile('style.css', Buffer.from('body{}'));
+    zip.addFile('script.js', Buffer.from('var x=1;'));
+    const zipPath = path.join(TEST_TEMP, 'assets-only.zip');
+    await fs.writeFile(zipPath, zip.toBuffer());
+
+    assert.strictEqual(isContainerZip(zipPath), false);
+    await fs.remove(zipPath);
+  });
+
+  it('returns false for a non-ZIP path', async () => {
+    const txtPath = path.join(TEST_TEMP, 'notazip.zip');
+    await fs.writeFile(txtPath, Buffer.from('not a zip'));
+
+    assert.strictEqual(isContainerZip(txtPath), false);
+    await fs.remove(txtPath);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// expandContainerZip
+// ---------------------------------------------------------------------------
+
+describe('expandContainerZip', () => {
+  it('extracts inner ZIPs into the upload directory', async () => {
+    const outer = new AdmZip();
+    outer.addFile('300x250.zip', validInnerZipBuffer());
+    outer.addFile('728x90.zip', validInnerZipBuffer());
+    const outerPath = path.join(TEST_TEMP, 'batch.zip');
+    await fs.writeFile(outerPath, outer.toBuffer());
+
+    const results = await expandContainerZip(outerPath, TEST_TEMP);
+
+    assert.strictEqual(results.length, 2);
+    assert.ok(results.some(r => r.name === '300x250.zip'));
+    assert.ok(results.some(r => r.name === '728x90.zip'));
+    for (const r of results) {
+      assert.ok(await fs.pathExists(r.path));
+      assert.ok(r.size > 0);
+      const magic = Buffer.alloc(4);
+      const fd = fs.openSync(r.path, 'r');
+      fs.readSync(fd, magic, 0, 4, 0);
+      fs.closeSync(fd);
+      assert.ok(magic.equals(ZIP_MAGIC), 'extracted inner ZIP has valid magic bytes');
+    }
+
+    await fs.remove(outerPath);
+    for (const r of results) await fs.remove(r.path).catch(() => {});
+  });
+
+  it('skips inner entries whose magic bytes are invalid', async () => {
+    const outer = new AdmZip();
+    outer.addFile('good.zip', validInnerZipBuffer());
+    outer.addFile('evil.zip', Buffer.from('not a zip file'));
+    const outerPath = path.join(TEST_TEMP, 'mixed-magic.zip');
+    await fs.writeFile(outerPath, outer.toBuffer());
+
+    const results = await expandContainerZip(outerPath, TEST_TEMP);
+
+    assert.strictEqual(results.length, 1);
+    assert.strictEqual(results[0].name, 'good.zip');
+
+    await fs.remove(outerPath);
+    for (const r of results) await fs.remove(r.path).catch(() => {});
+  });
+
+  it('deduplicates entries with the same basename', async () => {
+    const outer = new AdmZip();
+    outer.addFile('sub-a/banner.zip', validInnerZipBuffer());
+    outer.addFile('sub-b/banner.zip', validInnerZipBuffer());
+    const outerPath = path.join(TEST_TEMP, 'dupe-names.zip');
+    await fs.writeFile(outerPath, outer.toBuffer());
+
+    const results = await expandContainerZip(outerPath, TEST_TEMP);
+
+    assert.strictEqual(results.length, 2);
+    const names = results.map(r => r.name);
+    assert.ok(names.includes('banner.zip'));
+    assert.ok(names.includes('banner_2.zip'));
+
+    await fs.remove(outerPath);
+    for (const r of results) await fs.remove(r.path).catch(() => {});
+  });
+
+  it('respects the maxInner limit', async () => {
+    const outer = new AdmZip();
+    for (let i = 0; i < 5; i++) {
+      outer.addFile(`banner_${i}.zip`, validInnerZipBuffer());
+    }
+    const outerPath = path.join(TEST_TEMP, 'many-inner.zip');
+    await fs.writeFile(outerPath, outer.toBuffer());
+
+    const results = await expandContainerZip(outerPath, TEST_TEMP, { maxInner: 3 });
+
+    assert.strictEqual(results.length, 3);
+
+    await fs.remove(outerPath);
+    for (const r of results) await fs.remove(r.path).catch(() => {});
   });
 });

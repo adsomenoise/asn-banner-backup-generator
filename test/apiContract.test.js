@@ -4,6 +4,7 @@ import { startWebServer } from '../src/webServer.js';
 import { writeFile, mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import AdmZip from 'adm-zip';
 
 let server;
 let base;
@@ -52,6 +53,17 @@ function validZipContent() {
     '8AAAAAAA==',
     'base64'
   );
+}
+
+// Returns a Buffer for a ZIP-of-ZIPs (container ZIP) with the given inner ZIP names.
+function containerZipContent(innerNames = ['300x250.zip', '728x90.zip']) {
+  const outer = new AdmZip();
+  for (const name of innerNames) {
+    const inner = new AdmZip();
+    inner.addFile('index.html', Buffer.from('<html></html>'));
+    outer.addFile(name, inner.toBuffer());
+  }
+  return outer.toBuffer();
 }
 
 describe('API Contract — v1 endpoints', () => {
@@ -154,6 +166,33 @@ describe('API Contract — v1 endpoints', () => {
       assert.strictEqual(status, 201);
       assert.strictEqual(body.files.length, 3);
       assert.strictEqual(body.progress.total, 3);
+    });
+
+    it('expands a container ZIP (ZIP-of-ZIPs) into individual file entries', async () => {
+      const { status, body } = await uploadFiles([
+        { name: 'batch.zip', content: containerZipContent(['300x250.zip', '728x90.zip']) }
+      ]);
+      assert.strictEqual(status, 201);
+      // The single batch.zip becomes two entries — one per inner ZIP
+      assert.strictEqual(body.files.length, 2);
+      assert.strictEqual(body.progress.total, 2);
+      const names = body.files.map(f => f.fileName);
+      assert.ok(names.includes('300x250.zip'), `expected 300x250.zip in ${names}`);
+      assert.ok(names.includes('728x90.zip'), `expected 728x90.zip in ${names}`);
+      body.files.forEach(f => {
+        assert.strictEqual(f.fileType, 'zip');
+        assert.strictEqual(f.state, 'uploaded');
+      });
+    });
+
+    it('mixes expanded container ZIP with regular uploads', async () => {
+      const { status, body } = await uploadFiles([
+        { name: 'batch.zip', content: containerZipContent(['a.zip']) },
+        { name: 'banner.zip', content: validZipContent() }
+      ]);
+      assert.strictEqual(status, 201);
+      // 1 inner ZIP from batch + 1 regular ZIP = 2 total
+      assert.strictEqual(body.files.length, 2);
     });
   });
 

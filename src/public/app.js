@@ -306,7 +306,7 @@ validatorFileInput.addEventListener('change', () => handleValidatorFiles(validat
 // Error code → user-friendly message map
 // ---------------------------------------------------------------------------
 
-const ERROR_HELP = {
+const _ERROR_HELP = {
   NO_FILES: 'Select at least one .zip, .riv, or video file.',
   INVALID_FILE_TYPE: 'Only .zip, .riv, and video files (.mp4, .webm, .mov) are accepted.',
   UNSAFE_FILENAME: 'The file name contains invalid characters. Rename it and try again.',
@@ -336,7 +336,7 @@ const ERROR_LABELS = {
   UNKNOWN: 'Error',
 };
 
-function friendlyErrorLabel(code) {
+function _friendlyErrorLabel(code) {
   return ERROR_LABELS[code] || ERROR_LABELS.UNKNOWN;
 }
 
@@ -969,7 +969,7 @@ function resetValidatorUI() {
 // Polling / status
 // ---------------------------------------------------------------------------
 
-function updateAllFromServer(files) {
+function _updateAllFromServer(files) {
   files.forEach(sf => {
     const local = sessionFiles.find(x => x.id === sf.id);
     if (local) {
@@ -1177,7 +1177,7 @@ async function startDownload() {
     showToast('Download started', 'success');
     await new Promise(r => setTimeout(r, 1500));
     resetUI();
-  } catch (err) {
+  } catch {
     showToast('Download failed: network error', 'error');
     downloadBtn.textContent = 'Download ZIP';
     downloadBtn.disabled = false;

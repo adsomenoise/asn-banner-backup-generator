@@ -102,6 +102,69 @@ export async function extractZip(zipPath, tempDir, options = {}) {
   }
 }
 
+const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+
+/**
+ * Returns true if the ZIP at zipPath looks like a batch container: it has inner
+ * .zip entries but no .html entries. This distinguishes a "ZIP-of-ZIPs" from a
+ * normal banner ZIP that might also include a .zip asset.
+ */
+export function isContainerZip(zipPath) {
+  try {
+    const zip = new AdmZip(zipPath);
+    const entries = zip.getEntries().filter(e => !e.isDirectory && !shouldIgnore(e.entryName));
+    const hasInnerZips = entries.some(e => /\.zip$/i.test(e.entryName));
+    const hasHtml = entries.some(e => /\.html?$/i.test(e.entryName));
+    return hasInnerZips && !hasHtml;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extracts inner ZIP entries from a container ZIP into uploadDir.
+ * Each inner entry is magic-byte validated before being written.
+ * Duplicate basenames are disambiguated with a _N suffix.
+ * Returns an array of { name, path, size } for each extracted inner ZIP.
+ */
+export async function expandContainerZip(zipPath, uploadDir, options = {}) {
+  const maxInner = options.maxInner || 50;
+  const zip = new AdmZip(zipPath);
+  const entries = zip.getEntries().filter(e =>
+    !e.isDirectory &&
+    /\.zip$/i.test(e.entryName) &&
+    !shouldIgnore(e.entryName)
+  );
+
+  const usedNames = new Set();
+  const result = [];
+
+  for (const entry of entries) {
+    if (result.length >= maxInner) break;
+
+    const data = entry.getData();
+    if (data.length < 4 || !data.slice(0, 4).equals(ZIP_MAGIC)) continue;
+
+    let innerName = path.basename(entry.entryName);
+    if (!innerName || innerName.includes('..')) continue;
+
+    if (usedNames.has(innerName)) {
+      const ext = path.extname(innerName);
+      const base = path.basename(innerName, ext);
+      let i = 2;
+      while (usedNames.has(`${base}_${i}${ext}`)) i++;
+      innerName = `${base}_${i}${ext}`;
+    }
+    usedNames.add(innerName);
+
+    const innerPath = path.join(uploadDir, innerName);
+    await fs.writeFile(innerPath, data);
+    result.push({ name: innerName, path: innerPath, size: data.length });
+  }
+
+  return result;
+}
+
 export async function cleanTempDir(tempDir) {
   try {
     await fs.remove(tempDir);

@@ -48,6 +48,20 @@ export default [
     }
   },
   {
+    // app.js is a browser script (extracted from inline <script> in index.html).
+    // Override the node globals set by the src/**/*.js rule above.
+    files: ['src/public/**/*.js'],
+    languageOptions: {
+      sourceType: 'script',
+      globals: {
+        ...globals.browser
+      }
+    },
+    rules: {
+      'no-empty': 'off'
+    }
+  },
+  {
     files: ['src/jobs/JobStore.js'],
     rules: {
       'no-unused-vars': 'off'
