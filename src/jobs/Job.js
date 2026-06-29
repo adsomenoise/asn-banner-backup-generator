@@ -9,6 +9,7 @@ export class FileInfo {
     this.name = props.name || '';
     this.path = props.path || null;
     this.type = props.type || 'zip';
+    this.size = props.size || 0;
     this.state = props.state || 'uploaded';
     this.error = props.error || null;
     this.warnings = props.warnings || [];
@@ -29,6 +30,7 @@ export class FileInfo {
       fileId: this.id,
       fileName: this.name,
       fileType: this.type,
+      size: this.size,
       state: this.state,
       error: this.error || null,
       warnings: this.warnings.length > 0 ? this.warnings : undefined

@@ -388,6 +388,156 @@ Download the result ZIP archive. Each successful file's JPG is included. Failed 
 
 ---
 
+### `GET /api/v1/validator/presets`
+
+Returns the list of available validator presets.
+
+**Response `200 OK`**
+```json
+{
+  "presets": [
+    { "id": "generic",  "label": "Generic QA",    "appliesTo": ["zip", "riv", "video"] },
+    { "id": "cm360",    "label": "CM360 / DV360", "appliesTo": ["zip", "riv"] },
+    { "id": "gads",     "label": "Google Ads",    "appliesTo": ["zip", "riv"] },
+    { "id": "amazon",   "label": "Amazon Ads",    "appliesTo": ["zip", "riv", "video"] },
+    { "id": "xandr",    "label": "Xandr",         "appliesTo": ["zip", "riv"] },
+    { "id": "rive",     "label": "Rive",          "appliesTo": ["riv"] },
+    { "id": "video",    "label": "Video",         "appliesTo": ["video"] }
+  ]
+}
+```
+
+---
+
+### `POST /api/v1/validator/jobs`
+
+Upload files and create a validator job. Accepts `multipart/form-data`.
+
+Form field `files` — one or more `.zip`, `.riv`, or supported video files.
+
+Response `201 Created`:
+
+```json
+{
+  "jobId": "a1b2c3d4",
+  "status": "uploaded",
+  "preset": "generic",
+  "createdAt": "2026-06-16T13:00:00.000Z",
+  "updatedAt": "2026-06-16T13:00:00.000Z",
+  "progress": { "total": 1, "completed": 0, "failed": 0, "warnings": 0 },
+  "overall": { "status": "pass", "errors": 0, "warnings": 0, "info": 0 },
+  "files": [
+    {
+      "fileId": "001-banner_300x250",
+      "fileName": "banner_300x250.zip",
+      "fileType": "zip",
+      "size": 204800,
+      "status": "pending",
+      "metadata": {},
+      "findings": [],
+      "summary": { "status": "pass", "errors": 0, "warnings": 0, "info": 0 }
+    }
+  ],
+  "error": null
+}
+```
+
+Error responses — same codes as `POST /api/v1/jobs` plus `INVALID_PRESET`.
+
+---
+
+### `POST /api/v1/validator/jobs/{jobId}/validate`
+
+Start validation for a job using the chosen preset. Returns immediately; progress is tracked via `GET /api/v1/validator/jobs/{jobId}`.
+
+Request body (JSON): `{ "preset": "cm360" }`
+
+Response `200 OK` — same shape as `GET /api/v1/validator/jobs/{jobId}` with `status: "validating"`.
+
+Error responses:
+
+- `404` — `NOT_FOUND`
+- `400` — `INVALID_PRESET`
+- `409` — `ALREADY_VALIDATING`
+
+---
+
+### `GET /api/v1/validator/jobs/{jobId}`
+
+Get the full validator job status including per-file findings.
+
+Response `200 OK` (status: `complete`):
+
+```json
+{
+  "jobId": "a1b2c3d4",
+  "status": "complete",
+  "preset": "cm360",
+  "createdAt": "2026-06-16T13:00:00.000Z",
+  "updatedAt": "2026-06-16T13:00:01.234Z",
+  "progress": { "total": 1, "completed": 1, "failed": 0, "warnings": 1 },
+  "overall": { "status": "warning", "errors": 0, "warnings": 1, "info": 2 },
+  "files": [
+    {
+      "fileId": "001-banner_300x250",
+      "fileName": "banner_300x250.zip",
+      "fileType": "zip",
+      "size": 204800,
+      "status": "warning",
+      "metadata": {
+        "width": 300,
+        "height": 250,
+        "initialFileSize": 204800,
+        "htmlEntry": "index.html"
+      },
+      "findings": [
+        {
+          "severity": "warning",
+          "code": "FILE_SIZE_WARNING",
+          "title": "File size near limit",
+          "message": "Initial file size is 200 KB; CM360 recommends under 150 KB.",
+          "suggestion": "Compress images or reduce asset count.",
+          "path": null
+        },
+        {
+          "severity": "info",
+          "code": "HAS_BACKUP_HOOK",
+          "title": "Backup hook present",
+          "message": "window.__backupReady or generateBackupFrame() detected.",
+          "suggestion": "",
+          "path": null
+        }
+      ],
+      "summary": { "status": "warning", "errors": 0, "warnings": 1, "info": 1 }
+    }
+  ],
+  "error": null
+}
+```
+
+Finding severity levels:
+
+| Severity | Meaning |
+|----------|---------|
+| `error` | Fails the creative — platform will reject or malfunction |
+| `warning` | Likely causes delivery issues or poor performance |
+| `info` | Informational only; not counted against pass/fail |
+
+File status values:
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Waiting for validation to start |
+| `validating` | Currently being checked |
+| `pass` | No errors or warnings found |
+| `warning` | At least one warning finding, no errors |
+| `fail` | At least one error finding |
+| `error` | Validator itself failed (e.g. unreadable file) |
+
+Error responses: `404` — `NOT_FOUND`.
+
+---
+
 ### Standard Error Shape
 
 Every error response follows this shape:
@@ -441,6 +591,45 @@ Each file in a job transitions through these states:
 | `GET /api/download/:sessionId` | `GET /api/v1/jobs/:jobId/download` | — |
 
 The legacy routes invoke the same handler functions and return the same response shapes as their v1 counterparts.
+
+## Architecture
+
+```text
+Browser / API client
+        │
+        ▼
+┌───────────────────────────────────────────────────────┐
+│  Express  (webServer.js)                              │
+│                                                       │
+│  POST /api/v1/jobs          ──► InMemoryJobStore      │
+│  POST /api/v1/jobs/:id/process                        │
+│    │                                                  │
+│    ├─ extractZip ──────────────► temp/work/{jobId}/   │
+│    ├─ checkAssetPaths                                 │
+│    ├─ detectBannerSize                                │
+│    ├─ localServer (port :0)  ◄── serves extracted dir │
+│    └─ captureBackup ─────────── BrowserPool           │
+│         │                         (Chromium × N)      │
+│         └─ Sharp JPEG ──────────► temp/results/       │
+│                                                       │
+│  GET /api/v1/jobs/:id/download ──► ZIP + cleanup TTL  │
+│                                                       │
+│  POST /api/v1/validator/jobs                          │
+│  POST /api/v1/validator/jobs/:id/validate             │
+│    └─ validateAd ────── checks/ ──► ValidatorStore    │
+│         └─ renderChecks ── BrowserPool                │
+└───────────────────────────────────────────────────────┘
+        │
+        ▼
+  temp/  (uploads · work · results · validator)
+```
+
+Key data stores (all in-process, no external dependencies):
+
+- **InMemoryJobStore** — backup generator jobs
+- **ValidatorStore** — validator jobs
+- **BrowserPool** — reusable Playwright Chromium processes (singleton, shared)
+- **Metrics** — in-memory counters and timings, exposed via `/api/v1/health`
 
 ## How It Works
 
@@ -630,11 +819,14 @@ The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the re
 - The global rate limiter is an in-memory token bucket — it resets on process restart. For multi-instance deployments, a shared rate limiter (e.g. Redis) should be added via custom middleware.
 - The `--disable-web-security` Playwright flag is required for Rive CDN cross-origin loading and is safe because the URLs Playwright navigates to are always derived from job-scoped storage paths.
 
-### Known Tradeoffs
+### Known Limitations
 
+- **No job persistence.** Jobs are stored in memory only. Restarting the web server loses all active and completed jobs. In-progress captures are abandoned; completed results become unreachable. A SQLite-backed `JobStore` is planned but not yet implemented.
+- **No cancel endpoint.** Once processing starts, it runs to completion. There is no `DELETE /api/v1/jobs/:jobId` or equivalent to abort an in-progress job.
+- **Single-instance rate limiter.** The per-IP rate limiter is an in-memory `Map`. It resets on process restart and is not shared across instances. For multi-instance deployments, replace with a shared rate limiter backed by Redis or similar.
+- **Validator mode hidden on non-localhost.** The mode switch in the web UI is only visible when `isLocalhost()` is true. The live site does not show it (intentional soft feature flag pending production readiness).
 - Playwright requires Chromium installed (`npx playwright install chromium`); on Linux, system dependencies are needed (`npx playwright install-deps chromium`).
 - The local file server serves extracted content without authentication — it is intended only for local Playwright access.
-- Sessions are stored in memory; restarting the web server loses all active and completed sessions.
 
 ## Observability
 

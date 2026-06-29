@@ -80,9 +80,9 @@ describe('Frontend processing UI', () => {
     assert.strictEqual(await overlayProgress.getAttribute('role'), 'progressbar');
     assert.strictEqual(await overlayProgress.getAttribute('aria-label'), 'Processing dialog progress');
 
-    assert.strictEqual(
+    assert.match(
       await page.locator('.file-item').getAttribute('aria-label'),
-      'broken.zip, ZIP file, uploaded'
+      /^broken\.zip, ZIP file, \d+ B, uploaded$/
     );
     assert.strictEqual(
       await page.locator('#progressText').textContent(),
@@ -99,7 +99,7 @@ describe('Frontend processing UI', () => {
     assert.strictEqual(await overlayProgress.getAttribute('aria-valuenow'), '100');
 
     const fileSummary = await page.locator('.file-item').getAttribute('aria-label');
-    assert.match(fileSummary, /^broken\.zip, ZIP file, failed:/);
+    assert.match(fileSummary, /^broken\.zip, ZIP file, \d+ B, failed:/);
     assert.match(fileSummary, /The ZIP must contain at least one \.html file/);
 
     await page.close();

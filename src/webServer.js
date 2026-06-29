@@ -602,6 +602,7 @@ async function handleUpload(req, res) {
     name: f.originalname,
     path: f.path,
     type: /\.riv$/i.test(f.originalname) ? 'riv' : isVideoFile(f.originalname) ? 'video' : 'zip',
+    size: f.size || 0,
     state: 'uploaded'
   }));
 

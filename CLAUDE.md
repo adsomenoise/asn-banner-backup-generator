@@ -210,7 +210,7 @@ Full details + evidence in `docs/audit-2026-06-26.md`.
 | ID | Issue | File | Priority |
 | --- | --- | --- | --- |
 | UX-1 | Validator mode hidden on non-localhost — `isLocalhost()` guard in `initModeSwitch()` | `app.js` | Medium |
-| UX-2 | No file size shown in the uploaded files list | `index.html` | Low |
+| ~~UX-2~~ | ~~No file size shown in the uploaded files list~~ | ~~`index.html`~~ | ~~Low~~ ✅ |
 | ~~UX-3~~ | ~~Download triggers immediate cleanup even on network failure (see CQ-10)~~ | ~~`webServer.js:792`~~ | ~~Medium~~ ✅ |
 | UX-4 | No way to cancel in-progress processing | — | Low |
 | UX-5 | Upload limits (200 MB, 50 files) not shown in the drop zone hint | `index.html` | Low |
@@ -289,11 +289,11 @@ Current coverage is good (18 files, ~300+ tests). Missing:
 
 ## Documentation gaps (from audit 2026-06-26)
 
-- No architecture diagram
-- No CHANGELOG
-- No CONTRIBUTING.md
-- Validator API response shapes not fully documented in README
-- Known limitations not listed (no job persistence, no cancel, single-instance rate limiter)
+- ~~No architecture diagram~~ ✅
+- ~~No CHANGELOG~~ ✅
+- ~~No CONTRIBUTING.md~~ ✅
+- ~~Validator API response shapes not fully documented in README~~ ✅
+- ~~Known limitations not listed (no job persistence, no cancel, single-instance rate limiter)~~ ✅
 
 ---
 

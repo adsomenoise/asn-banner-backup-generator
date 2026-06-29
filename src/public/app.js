@@ -344,6 +344,13 @@ function plural(count, singular, pluralForm = `${singular}s`) {
   return count === 1 ? singular : pluralForm;
 }
 
+function formatFileSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function readableFileType(type) {
   switch (type) {
     case 'zip': return 'ZIP file';
@@ -361,7 +368,8 @@ function readableFileState(file) {
 }
 
 function fileStatusSummary(file) {
-  return `${file.name}, ${readableFileType(file.type)}, ${readableFileState(file)}`;
+  const size = file.size ? `, ${formatFileSize(file.size)}` : '';
+  return `${file.name}, ${readableFileType(file.type)}${size}, ${readableFileState(file)}`;
 }
 
 function setProgress(percent) {
@@ -509,6 +517,7 @@ function handleFiles(files) {
         id: f.fileId,
         name: f.fileName,
         type: f.fileType,
+        size: f.size || 0,
         state: f.state,
         error: f.error || null
       }));
@@ -546,11 +555,13 @@ function renderFileList() {
     div.setAttribute('role', 'listitem');
     div.setAttribute('aria-label', fileStatusSummary(f));
 
+    const sizeLabel = f.size ? `<span class="file-size">${formatFileSize(f.size)}</span>` : '';
     div.innerHTML = `
       <div class="file-item-col">
         <div class="file-item-row">
           <span class="file-type-badge ${ext}">${ext}</span>
           <span class="file-name">${escapeHtml(f.name)}</span>
+          ${sizeLabel}
         </div>
         <div class="file-error" id="err-${escapeHtml(f.id)}"></div>
         <div class="file-warning" id="warn-${escapeHtml(f.id)}"></div>
