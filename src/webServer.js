@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import AdmZip from 'adm-zip';
 import { extractZip, isContainerZip, expandContainerZip } from './extractZip.js';
+import { checkAssetPaths } from './checkAssetPaths.js';
 import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
 import { captureBackup } from './captureBackup.js';
@@ -408,6 +409,13 @@ async function processJob(jobId) {
           const entry = await findBannerEntry(extracted);
           const dimensions = await detectBannerSize(entry, file.path);
 
+          const { missing, checked } = await checkAssetPaths(entry, extracted);
+          if (missing.length > 0) {
+            fileLog.warn('Missing asset references', { missing, checked });
+            file.warnings.push(...missing.map(m => `Missing asset: ${m}`));
+            metrics.increment('file.missing_assets', { count: missing.length });
+          }
+
           const url = storage.toPublicUrl(port, entry, serveDir);
 
           fileLog.info('Capturing ZIP creative', { dimensions: `${dimensions.width}x${dimensions.height}` });
@@ -630,7 +638,30 @@ async function handleValidatorUpload(req, res) {
     return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
   }
 
-  const fileReports = files.map((file, index) => new ValidatorFileReport({
+  // Expand container ZIPs into individual entries (same logic as handleUpload).
+  let allFiles = [];
+  for (const f of files) {
+    if (/\.zip$/i.test(f.originalname) && isContainerZip(f.path)) {
+      const inner = await expandContainerZip(f.path, path.dirname(f.path), { maxInner: MAX_UPLOAD_FILES });
+      if (inner.length > 0) {
+        metrics.increment('validator.upload.container_zip_expanded');
+        allFiles.push(...inner.map(i => ({ originalname: i.name, path: i.path, size: i.size })));
+        await fs.remove(f.path).catch(() => {});
+        continue;
+      }
+    }
+    allFiles.push(f);
+  }
+
+  if (allFiles.length > MAX_UPLOAD_FILES) {
+    await Promise.all(allFiles.map(f => fs.remove(f.path).catch(() => {})));
+    return res.status(400).json(errorBody(
+      `Batch ZIP expansion resulted in ${allFiles.length} files (max ${MAX_UPLOAD_FILES})`,
+      'TOO_MANY_FILES'
+    ));
+  }
+
+  const fileReports = allFiles.map((file, index) => new ValidatorFileReport({
     fileId: createValidatorFileId(file.originalname, index),
     fileName: file.originalname,
     fileType: validatorFileType(file.originalname),
@@ -651,7 +682,7 @@ async function handleValidatorUpload(req, res) {
 
   await validatorStore.create(job);
   metrics.increment('validator.upload.complete');
-  metrics.count('validator.upload.files', files.length);
+  metrics.count('validator.upload.files', allFiles.length);
 
   res.status(201).json(job.toJSON());
 }
@@ -819,9 +850,16 @@ async function handleDownload(req, res) {
   metrics.increment('download.started');
   log.info('Download started');
 
-  res.download(zipPath, `backup-images-${job.id}.zip`, async () => {
+  res.download(zipPath, `backup-images-${job.id}.zip`, async (err) => {
     const downloadDuration = Date.now() - downloadStart;
     metrics.timing('download.duration', downloadDuration);
+    if (err) {
+      // Transfer interrupted (network drop, client abort, etc.).
+      // Leave the job and files intact so the user can retry within the TTL window.
+      log.warn('Download interrupted — results preserved for retry', { error: err.message, duration: downloadDuration });
+      metrics.increment('download.interrupted');
+      return;
+    }
     metrics.increment('download.complete');
     log.info('Download complete', { duration: downloadDuration });
     await cleanupJob(job);

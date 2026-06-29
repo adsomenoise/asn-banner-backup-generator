@@ -553,6 +553,7 @@ function renderFileList() {
           <span class="file-name">${escapeHtml(f.name)}</span>
         </div>
         <div class="file-error" id="err-${escapeHtml(f.id)}"></div>
+        <div class="file-warning" id="warn-${escapeHtml(f.id)}"></div>
       </div>
       <span class="state-badge ${state}" id="badge-${escapeHtml(f.id)}">${stateBadgeContent(state)}</span>
     `;
@@ -560,6 +561,9 @@ function renderFileList() {
 
     if (state === 'failed' && f.error) {
       showFileError(f.id, f.error);
+    }
+    if (f.warnings && f.warnings.length > 0) {
+      showFileWarnings(f.id, f.warnings);
     }
   });
 }
@@ -576,11 +580,12 @@ function stateBadgeContent(state) {
   }
 }
 
-function updateFileState(fileId, newState, errorMsg) {
+function updateFileState(fileId, newState, errorMsg, warnings) {
   const f = sessionFiles.find(x => x.id === fileId);
   if (!f) return;
   f.state = newState;
   if (errorMsg) f.error = errorMsg;
+  if (warnings) f.warnings = warnings;
 
   const badge = document.getElementById('badge-' + fileId);
   if (badge) {
@@ -598,6 +603,12 @@ function updateFileState(fileId, newState, errorMsg) {
   } else if (newState !== 'failed') {
     clearFileError(fileId);
   }
+
+  if (warnings && warnings.length > 0) {
+    showFileWarnings(fileId, warnings);
+  } else {
+    clearFileWarnings(fileId);
+  }
 }
 
 function showFileError(fileId, msg) {
@@ -608,6 +619,17 @@ function showFileError(fileId, msg) {
 
 function clearFileError(fileId) {
   const el = document.getElementById('err-' + fileId);
+  if (el) el.textContent = '';
+}
+
+function showFileWarnings(fileId, warnings) {
+  const el = document.getElementById('warn-' + fileId);
+  if (!el) return;
+  el.textContent = warnings.join(', ');
+}
+
+function clearFileWarnings(fileId) {
+  const el = document.getElementById('warn-' + fileId);
   if (el) el.textContent = '';
 }
 
@@ -1068,7 +1090,7 @@ async function pollStatus() {
 
       if (data.files) {
         data.files.forEach(sf => {
-          updateFileState(sf.fileId, sf.state, sf.error);
+          updateFileState(sf.fileId, sf.state, sf.error, sf.warnings);
         });
       }
 

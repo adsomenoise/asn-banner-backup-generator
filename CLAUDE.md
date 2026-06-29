@@ -48,17 +48,19 @@ GET /api/v1/jobs/:id/download → res.download → cleanupJob
 | `src/webServer.js` | Express server, all routes, Multer, job lifecycle (1113 lines — the monolith) |
 | `src/captureBackup.js` | 4-strategy Playwright screenshot + Sharp JPEG compression |
 | `src/browserPool.js` | Singleton Chromium pool (reuses browsers, fresh context per capture) |
-| `src/extractZip.js` | ZIP extraction with path-traversal + size limits |
+| `src/extractZip.js` | ZIP extraction with path-traversal + size limits; `isContainerZip` / `expandContainerZip` for batch ZIPs |
+| `src/checkAssetPaths.js` | Checks banner assets exist: HTML refs (`src`, `<link href>`, `srcset`, inline `url()`), then opens linked CSS files for `url()`/`@import`, and linked JS files for string-literal asset paths (covers cache-busting query strings). Non-blocking — reports missing files as `FileInfo.warnings`. |
 | `src/findBannerEntry.js` | Recursive HTML file discovery, prefers shallowest |
 | `src/detectBannerSize.js` | meta tag → canvas → div → filename → 300×250 |
 | `src/localServer.js` | Job-scoped static file server for Playwright |
 | `src/riveTemplate.js` | Generates wrapper HTML for `.riv` files |
 | `src/auth/middleware.js` | Auth factory: DevAuthAdapter vs HeaderAuthAdapter |
-| `src/jobs/Job.js` | Job + FileInfo models with state machines |
+| `src/jobs/Job.js` | Job + FileInfo models with state machines; `FileInfo.warnings[]` surfaces non-fatal issues (e.g. missing assets) to the UI |
 | `src/jobs/JobStore.js` | JobStore interface + InMemoryJobStore |
 | `src/storage/LocalStorage.js` | Job-scoped path helpers under `temp/` |
 | `src/validator/` | Ad validator subsystem (checks, presets, findings) |
-| `src/public/index.html` | Entire frontend — HTML + 1200-line inline `<script>` |
+| `src/public/index.html` | Frontend HTML shell — layout, styles, no inline script |
+| `src/public/app.js` | Frontend JS — all UI logic, upload/polling/auth (extracted from index.html for SEC-1) |
 
 ### Directory layout under `temp/`
 
@@ -104,11 +106,13 @@ Presets live in `src/validator/presets.js`. The frontend preset `<select>` is ha
 
 - **`webServer.js:processJob()` is fire-and-forget** — called without `await`. Errors inside are caught and written to job state, not propagated to the HTTP response.
 
+- **`checkAssetPaths` JS scan is heuristic** — it regex-matches quoted string literals ending in asset extensions (`.png`, `.jpg`, `.svg`, etc.) inside linked `.js` files. Cache-busting query strings (e.g. `"img.png?1726579219"`) are stripped before the filesystem check. It will NOT catch dynamically constructed paths (`"images/bg_" + size + ".jpg"`), assets loaded via fetch/XHR, or assets in second-level `@import`ed CSS files.
+
 - **Playwright runs with `--disable-web-security`** — intentional (Rive CDN loading), but means banner JS can reach any localhost port and bypass CSP. `.riv` files are now validated against the Rive binary signature before being served, but uploaded ZIP HTML still runs unrestricted. See SEC-7 in the audit.
 
 - ~~**`renderChecks.js` does NOT use the browser pool** — it calls `chromium.launch()` directly. Under concurrent validator jobs this can spawn many Chromium processes. Fix is in the audit backlog (PERF-1).~~ ✅
 
-- **Download callback cleans up the job on any outcome**, including aborted downloads. If a user's network drops mid-download, their results are gone. Fix: defer cleanup to TTL (CQ-10 in audit).
+- ~~**Download callback cleans up the job on any outcome**, including aborted downloads. If a user's network drops mid-download, their results are gone. Fix: defer cleanup to TTL (CQ-10 in audit).~~ ✅ Cleanup now only fires on successful transfer; interrupted downloads leave results intact for retry within the 30-min TTL.
 
 - **Validator mode is hidden on non-localhost** — `initModeSwitch()` in `index.html` only shows the mode switch when `isLocalhost()` is true. The live site doesn't show it. Currently intentional as a soft feature flag.
 
@@ -122,7 +126,7 @@ Presets live in `src/validator/presets.js`. The frontend preset `<select>` is ha
 
 - **The Rive wrapper HTML hardcodes a CDN URL** — `https://s0.2mdn.net/creatives/assets/5617025/rive.js`. No SRI hash, version pinned by path only.
 
-- **Login comparison is not timing-safe** — `===` used in `handleLogin`. Rate limiter makes this low risk but it should be `crypto.timingSafeEqual`.
+- ~~**Login comparison is not timing-safe** — `===` used in `handleLogin`. Rate limiter makes this low risk but it should be `crypto.timingSafeEqual`.~~ ✅
 
 ---
 
@@ -168,7 +172,7 @@ Full details + evidence in `docs/audit-2026-06-26.md`.
 | ~~SEC-1~~ | ~~CSP allows `'unsafe-inline'` — move `<script>` block to `app.js`~~ | ~~`webServer.js:968`~~ | ~~High~~ ✅ |
 | ~~SEC-2~~ | ~~`handleLogin` uses `===` not `crypto.timingSafeEqual`~~ | ~~`webServer.js:863`~~ | ~~Medium~~ ✅ |
 | ~~SEC-3~~ | ~~`.riv` file is copied as `.js` and executed in Playwright — no binary validation~~ | ~~`webServer.js:363`~~ | ~~High~~ ✅ |
-| SEC-4 | Auth session in `localStorage` — XSS-accessible (mitigated once SEC-1 fixed) | `index.html:142` | Medium |
+| SEC-4 | Auth session in `localStorage` — XSS-accessible (mitigated once SEC-1 fixed) | `app.js` | Medium |
 | SEC-5 | Rate limiter `Map` grows unbounded — stale IPs never pruned | `webServer.js:1002` | Medium |
 | SEC-6 | Health endpoint is public and exposes auth mode + all metrics | `webServer.js:876` | Low |
 | SEC-7 | Playwright launched with `--disable-web-security` — required but risky; bundle `rive.js` locally to remove | `browserPool.js:85` | Medium |
@@ -187,7 +191,7 @@ Full details + evidence in `docs/audit-2026-06-26.md`.
 | CQ-7 | `isPathSafe` exported API is confusing — silently returns `false` for relative paths | `extractZip.js:25` | Low |
 | CQ-8 | `riveTemplate.js` hardcodes CDN URL with no SRI hash; version may be stale | `riveTemplate.js:44` | Medium |
 | CQ-9 | `Semaphore` class in `webServer.js` duplicates `BrowserPool` waiter logic | `webServer.js:89` | Low |
-| CQ-10 | Download callback cleans up job on any outcome including mid-transfer disconnect | `webServer.js:792` | Medium |
+| ~~CQ-10~~ | ~~Download callback cleans up job on any outcome including mid-transfer disconnect~~ | ~~`webServer.js:792`~~ | ~~Medium~~ ✅ |
 
 ### Performance & reliability
 
@@ -205,12 +209,12 @@ Full details + evidence in `docs/audit-2026-06-26.md`.
 
 | ID | Issue | File | Priority |
 | --- | --- | --- | --- |
-| UX-1 | Validator mode hidden on non-localhost — `isLocalhost()` guard in `initModeSwitch()` | `index.html:538` | Medium |
+| UX-1 | Validator mode hidden on non-localhost — `isLocalhost()` guard in `initModeSwitch()` | `app.js` | Medium |
 | UX-2 | No file size shown in the uploaded files list | `index.html` | Low |
-| UX-3 | Download triggers immediate cleanup even on network failure (see CQ-10) | `webServer.js:792` | Medium |
+| ~~UX-3~~ | ~~Download triggers immediate cleanup even on network failure (see CQ-10)~~ | ~~`webServer.js:792`~~ | ~~Medium~~ ✅ |
 | UX-4 | No way to cancel in-progress processing | — | Low |
 | UX-5 | Upload limits (200 MB, 50 files) not shown in the drop zone hint | `index.html` | Low |
-| UX-6 | Polling uses fixed interval (1 s backup, 500 ms validator) — no backoff | `index.html:1232` | Low |
+| UX-6 | Polling uses fixed interval (1 s backup, 500 ms validator) — no backoff | `app.js` | Low |
 
 ---
 
@@ -222,7 +226,7 @@ Full details + evidence in `docs/audit-2026-06-26.md`.
 2. ~~**SEC-1** — Move `<script>` block to `app.js`, remove `'unsafe-inline'` from CSP~~ ✅
 3. ~~**PERF-1** — Route `renderChecks.js` through the browser pool or add a semaphore cap~~ ✅
 4. ~~**SEC-2** — Use `crypto.timingSafeEqual` in `handleLogin`~~ ✅
-5. **CQ-10 / UX-3** — Defer result ZIP cleanup to TTL instead of download callback
+5. ~~**CQ-10 / UX-3** — Defer result ZIP cleanup to TTL instead of download callback~~ ✅
 
 ### Short-term (reliability + UX)
 
@@ -254,12 +258,12 @@ Full details + evidence in `docs/audit-2026-06-26.md`.
 
 - Final-frame detection heuristic — confirm screenshot captures the intended last frame, not a loading state
 - Downloadable per-creative audit report (PDF/JSON)
-- Batch ZIP processing — accept a ZIP-of-ZIPs
+- ~~Batch ZIP processing — accept a ZIP-of-ZIPs~~ ✅
 - CM360/DV360 deep compliance (VAST tag, safe-frame API check)
 - Per-platform backup size/quality/naming presets
 - Webhook/callback on job completion (instead of polling)
 - Multi-instance support (Redis job store + shared rate limiter)
-- Asset path resolution check — validate that all referenced assets exist in the ZIP before capture
+- ~~Asset path resolution check — validate that all referenced assets exist in the ZIP before capture~~ ✅
 - Combined backup + validation run in one job
 - Rive animation validation (dimensions, state machine names, loop behaviour)
 
@@ -272,11 +276,11 @@ Current coverage is good (18 files, ~300+ tests). Missing:
 | Gap | Related finding |
 |---|---|
 | Integration: full ZIP → screenshot → actual JPG output | — |
-| `renderChecks.js` Chromium concurrency / resource exhaustion | PERF-1 |
+| ~~`renderChecks.js` Chromium concurrency / resource exhaustion~~ | ~~PERF-1~~ ✅ |
 | Browser pool crash recovery (dead browser detection) | PERF-7 |
-| Download callback cleanup fires on disconnect | CQ-10 |
+| ~~Download callback cleanup fires on disconnect~~ | ~~CQ-10~~ ✅ |
 | Stuck `processing` job pruning | PERF-4 |
-| Malicious `.riv` binary (non-Rive payload) rejected | SEC-3 |
+| ~~Malicious `.riv` binary (non-Rive payload) rejected~~ | ~~SEC-3~~ ✅ |
 | Rate limiter Map memory growth | SEC-5 |
 | Retry with mix of failed + complete files | — |
 | Concurrent uploads from the same user | PERF-6 |

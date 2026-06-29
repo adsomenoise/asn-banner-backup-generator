@@ -11,6 +11,7 @@ export class FileInfo {
     this.type = props.type || 'zip';
     this.state = props.state || 'uploaded';
     this.error = props.error || null;
+    this.warnings = props.warnings || [];
   }
 
   setState(newState, errorMsg) {
@@ -29,7 +30,8 @@ export class FileInfo {
       fileName: this.name,
       fileType: this.type,
       state: this.state,
-      error: this.error || null
+      error: this.error || null,
+      warnings: this.warnings.length > 0 ? this.warnings : undefined
     };
   }
 }

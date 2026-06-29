@@ -189,6 +189,10 @@ body {
   font-size: 0.75rem; color: var(--state-failed); margin-top: 0.375rem;
   line-height: 1.4; word-break: break-word;
 }
+.file-warning {
+  font-size: 0.75rem; color: var(--state-processing); margin-top: 0.375rem;
+  line-height: 1.4; word-break: break-word;
+}
 .file-error-code {
   display: inline-block; font-family: monospace; font-size: 0.6875rem;
   background: rgba(239,68,68,0.1); padding: 0 4px; border-radius: 3px;
