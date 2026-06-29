@@ -193,6 +193,124 @@ describe('HTTP security', () => {
       assert.strictEqual(res.status, 201);
     });
   });
+
+  describe('Rive magic-byte validation', () => {
+    it('rejects a .riv upload that is not a Rive binary', async () => {
+      const mp = createMultipartBody({}, [{
+        name: 'banner_300x250.riv',
+        content: 'alert("i am evil js")',
+        mime: 'application/octet-stream'
+      }]);
+      const res = await fetch('POST', `${baseUrl}/api/v1/jobs`, {
+        headers: {
+          ...mp.headers,
+          'x-auth-user-id': 'test-user'
+        },
+        body: mp.body
+      });
+      assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.body.code, 'INVALID_FILE_TYPE');
+    });
+
+    it('rejects a .riv upload that starts with ZIP magic bytes', async () => {
+      const mp = createMultipartBody({}, [{
+        name: 'banner_300x250.riv',
+        content: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]).toString('binary'),
+        mime: 'application/octet-stream'
+      }]);
+      const res = await fetch('POST', `${baseUrl}/api/v1/jobs`, {
+        headers: {
+          ...mp.headers,
+          'x-auth-user-id': 'test-user'
+        },
+        body: mp.body
+      });
+      assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.body.code, 'INVALID_FILE_TYPE');
+    });
+
+    it('accepts a .riv upload with valid Rive magic bytes', async () => {
+      // "RIVE" header followed by plausible version bytes
+      const mp = createMultipartBody({}, [{
+        name: 'banner_300x250.riv',
+        content: Buffer.from([0x52, 0x49, 0x56, 0x45, 0x07, 0x01, 0x00, 0x00]).toString('binary'),
+        mime: 'application/octet-stream'
+      }]);
+      const res = await fetch('POST', `${baseUrl}/api/v1/jobs`, {
+        headers: {
+          ...mp.headers,
+          'x-auth-user-id': 'test-user'
+        },
+        body: mp.body
+      });
+      // 201 = accepted by upload handler (will fail later during processing — no valid dimensions)
+      assert.strictEqual(res.status, 201);
+    });
+  });
+});
+
+// -----------------------------------------------------------------------
+// Login endpoint
+// -----------------------------------------------------------------------
+
+describe('Login endpoint', () => {
+  let server;
+  let baseUrl;
+  const savedPass = process.env.ADMIN_PASSWORD;
+  const savedUser = process.env.ADMIN_USERNAME;
+
+  before(async () => {
+    process.env.ADMIN_PASSWORD = 'correct-horse';
+    process.env.ADMIN_USERNAME = 'admin';
+    server = await startWebServer(0);
+    const addr = server.address();
+    baseUrl = `http://localhost:${addr.port}`;
+  });
+
+  after(async () => {
+    if (server) await new Promise(r => server.close(r));
+    if (savedPass === undefined) delete process.env.ADMIN_PASSWORD;
+    else process.env.ADMIN_PASSWORD = savedPass;
+    if (savedUser === undefined) delete process.env.ADMIN_USERNAME;
+    else process.env.ADMIN_USERNAME = savedUser;
+  });
+
+  function postLogin(body) {
+    return fetch('POST', `${baseUrl}/api/login`, {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  }
+
+  it('returns 200 for correct credentials', async () => {
+    const res = await postLogin({ username: 'admin', password: 'correct-horse' });
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.body.userId);
+  });
+
+  it('returns 401 for wrong password', async () => {
+    const res = await postLogin({ username: 'admin', password: 'wrong' });
+    assert.strictEqual(res.status, 401);
+    assert.strictEqual(res.body.code, 'INVALID_CREDENTIALS');
+  });
+
+  it('returns 401 for wrong username', async () => {
+    const res = await postLogin({ username: 'notadmin', password: 'correct-horse' });
+    assert.strictEqual(res.status, 401);
+    assert.strictEqual(res.body.code, 'INVALID_CREDENTIALS');
+  });
+
+  it('returns 401 for a password that is a prefix of the correct one', async () => {
+    const res = await postLogin({ username: 'admin', password: 'correct' });
+    assert.strictEqual(res.status, 401);
+    assert.strictEqual(res.body.code, 'INVALID_CREDENTIALS');
+  });
+
+  it('returns 401 for empty credentials', async () => {
+    const res = await postLogin({ username: '', password: '' });
+    assert.strictEqual(res.status, 401);
+    assert.strictEqual(res.body.code, 'INVALID_CREDENTIALS');
+  });
 });
 
 // -----------------------------------------------------------------------

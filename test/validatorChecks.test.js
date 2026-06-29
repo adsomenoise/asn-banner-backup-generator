@@ -14,6 +14,7 @@ import { checkRiveFile } from '../src/validator/checks/riveChecks.js';
 import { checkVideoFile, classifyVideoMetadata } from '../src/validator/checks/videoChecks.js';
 import { getPreset } from '../src/validator/presets.js';
 import { getVideoMetadata, probeVideoLoudness } from '../src/captureVideo.js';
+import { closeBrowserPool } from '../src/browserPool.js';
 
 const TEST_TEMP = path.resolve('test-temp-validator-checks');
 
@@ -22,6 +23,7 @@ before(async () => {
 });
 
 after(async () => {
+  await closeBrowserPool();
   await fs.remove(TEST_TEMP);
 });
 

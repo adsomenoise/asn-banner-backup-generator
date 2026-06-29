@@ -95,7 +95,7 @@ Initial presets:
   - Rive file checks: filename dimensions, wrapper generation viability, renderability smoke check.
 
 - `video`
-  - Video checks: supported extension, readable metadata, dimensions, duration, decode/frame-capture viability.
+  - Video checks: supported extension, audio level, loudness, bitrate, readable metadata, dimensions, duration, decode/frame-capture viability.
 
 If an uploaded file type is not applicable for a selected preset, the validator should return a warning finding instead of failing the whole job unexpectedly.
 
@@ -144,7 +144,7 @@ HTML5/platform checks:
 
 - Required HTML entry present.
 - Dimensions detected and reasonable.
-- `clickTag` or equivalent click-through hook present.
+- `clickTag` or equivalent click-through hook present in all possible ways to write it.
 - Unsupported or suspicious file types in ZIP.
 - External asset references flagged as warnings unless allowed by preset.
 - Package limits from preset definitions.

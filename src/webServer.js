@@ -543,19 +543,24 @@ async function handleUpload(req, res) {
     return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
   }
 
-  // ZIP magic-byte validation
+  // Magic-byte validation for ZIP and Rive files
   const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  const RIV_MAGIC = Buffer.from([0x52, 0x49, 0x56, 0x45]); // "RIVE"
   for (const f of files) {
-    if (/\.zip$/i.test(f.originalname)) {
-      const fd = fs.openSync(f.path, 'r');
-      const buf = Buffer.alloc(4);
-      fs.readSync(fd, buf, 0, 4, 0);
-      fs.closeSync(fd);
-      if (!buf.equals(ZIP_MAGIC)) {
-        log.warn('Invalid ZIP magic bytes', { fileName: f.originalname });
-        metrics.increment('upload.rejected', { reason: 'bad_magic' });
-        return res.status(400).json(errorBody(`File "${f.originalname}" has invalid ZIP magic bytes`, 'INVALID_FILE_TYPE'));
-      }
+    const isZip = /\.zip$/i.test(f.originalname);
+    const isRiv = /\.riv$/i.test(f.originalname);
+    if (!isZip && !isRiv) continue;
+
+    const expected = isZip ? ZIP_MAGIC : RIV_MAGIC;
+    const label = isZip ? 'ZIP' : 'Rive';
+    const fd = fs.openSync(f.path, 'r');
+    const buf = Buffer.alloc(4);
+    fs.readSync(fd, buf, 0, 4, 0);
+    fs.closeSync(fd);
+    if (!buf.equals(expected)) {
+      log.warn(`Invalid ${label} magic bytes`, { fileName: f.originalname });
+      metrics.increment('upload.rejected', { reason: 'bad_magic' });
+      return res.status(400).json(errorBody(`File "${f.originalname}" is not a valid ${label} file`, 'INVALID_FILE_TYPE'));
     }
   }
 
@@ -860,7 +865,15 @@ function handleLogin(req, res) {
     return res.status(500).json(errorBody('ADMIN_PASSWORD not configured', 'SERVER_CONFIG'));
   }
 
-  if (username !== adminUser || password !== adminPass) {
+  const userBuf = Buffer.from(username || '');
+  const passBuf = Buffer.from(password || '');
+  const expectedUserBuf = Buffer.from(adminUser);
+  const expectedPassBuf = Buffer.from(adminPass);
+  const userMatch = userBuf.length === expectedUserBuf.length &&
+    crypto.timingSafeEqual(userBuf, expectedUserBuf);
+  const passMatch = passBuf.length === expectedPassBuf.length &&
+    crypto.timingSafeEqual(passBuf, expectedPassBuf);
+  if (!userMatch || !passMatch) {
     metrics.increment('login.rejected', { reason: 'invalid_credentials' });
     return res.status(401).json(errorBody('Invalid credentials', 'INVALID_CREDENTIALS'));
   }
@@ -965,7 +978,7 @@ export async function startWebServer(port = 3001, opts = {}) {
     // Prevent public indexing of the UI
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none';");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none';");
     next();
   });
 

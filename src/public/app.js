@@ -1,0 +1,1189 @@
+// ---------------------------------------------------------------------------
+// Auth session — remember login for 14 days
+// ---------------------------------------------------------------------------
+
+const AUTH_KEY = 'bbg_auth';
+const AUTH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+function getAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    if (!payload || !payload.identity || !payload.expiresAt || Date.now() >= payload.expiresAt) {
+      clearAuth();
+      return null;
+    }
+    return payload.identity;
+  } catch {
+    clearAuth();
+    return null;
+  }
+}
+
+function setAuth(identity) {
+  localStorage.setItem(AUTH_KEY, JSON.stringify({
+    identity,
+    expiresAt: Date.now() + AUTH_TTL_MS
+  }));
+}
+
+function clearAuth() {
+  localStorage.removeItem(AUTH_KEY);
+}
+
+// Inject auth headers into all fetch calls to /api/*
+const _origFetch = window.fetch;
+window.fetch = function(url, options = {}) {
+  const auth = getAuth();
+  if (auth && typeof url === 'string' && url.startsWith('/api/')) {
+    options = { ...options };
+    options.headers = {
+      ...options.headers,
+      'x-user-id': auth.userId,
+      'x-tenant-id': auth.tenantId,
+      'x-client-id': auth.clientId
+    };
+  }
+  return _origFetch.call(this, url, options);
+};
+
+function handleLogin(event) {
+  event.preventDefault();
+  const btn = document.getElementById('loginBtn');
+  const err = document.getElementById('loginError');
+  const username = document.getElementById('loginUsername').value;
+  const password = document.getElementById('loginPassword').value;
+  btn.disabled = true;
+  btn.textContent = 'Signing in...';
+  err.classList.remove('visible');
+
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  })
+    .then(r => {
+      if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Invalid credentials'); });
+      return r.json();
+    })
+    .then(identity => {
+      setAuth(identity);
+      closeLoginDialog();
+    })
+    .catch(e => {
+      err.textContent = e.message;
+      err.classList.add('visible');
+    })
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = 'Sign in';
+    });
+  return false;
+}
+
+// On page load, check if auth is needed
+(function init() {
+  if (getAuth()) return;
+  fetch('/api/v1/health').then(r => r.json()).then(h => {
+    if (h.authMode === 'production') {
+      showLoginDialog();
+    }
+  }).catch(() => {});
+})();
+
+let sessionId = null;
+let sessionFiles = [];    // { id, name, type, state, error }
+let polling = false;
+let completed = false;
+
+const backupModeBtn = document.getElementById('backupModeBtn');
+const validatorModeBtn = document.getElementById('validatorModeBtn');
+const modeSwitch = document.getElementById('modeSwitch');
+const backupPanel = document.getElementById('backupPanel');
+const validatorPanel = document.getElementById('validatorPanel');
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const fileList = document.getElementById('fileList');
+const processBtn = document.getElementById('processBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const retryBtn = document.getElementById('retryBtn');
+const resetBtn = document.getElementById('resetBtn');
+const progressWrap = document.getElementById('progressWrap');
+const progressBar = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const overlay = document.getElementById('overlay');
+const waitingText = document.getElementById('waitingText');
+const errorSummary = document.getElementById('errorSummary');
+const overlayProgressBar = document.getElementById('overlayProgressBar');
+const overlayProgressFill = document.getElementById('overlayProgressFill');
+const overlayProgressText = document.getElementById('overlayProgressText');
+const overlayFiles = document.getElementById('overlayFiles');
+const loginOverlay = document.getElementById('loginOverlay');
+const appContainer = document.querySelector('.container');
+const validatorPreset = document.getElementById('validatorPreset');
+const validatorDropZone = document.getElementById('validatorDropZone');
+const validatorFileInput = document.getElementById('validatorFileInput');
+const validatorFileList = document.getElementById('validatorFileList');
+const validateBtn = document.getElementById('validateBtn');
+const validatorResetBtn = document.getElementById('validatorResetBtn');
+const validatorProgressWrap = document.getElementById('validatorProgressWrap');
+const validatorProgressBar = document.getElementById('validatorProgressBar');
+const validatorProgressFill = document.getElementById('validatorProgressFill');
+const validatorStatusText = document.getElementById('validatorStatusText');
+const validatorReport = document.getElementById('validatorReport');
+
+let validatorJobId = null;
+let validatorFiles = [];
+let validatorPolling = false;
+
+let activeModal = null;
+
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])'
+].join(',');
+
+function visibleFocusableElements(root) {
+  return Array.from(root.querySelectorAll(FOCUSABLE_SELECTOR))
+    .filter(el => !el.closest('[inert]') && el.offsetParent !== null);
+}
+
+function setAppBackgroundInert(dialog, inert) {
+  if (dialog === loginOverlay) {
+    Array.from(appContainer.children)
+      .filter(child => child !== loginOverlay)
+      .forEach(child => {
+        child.inert = inert;
+        child.querySelectorAll(FOCUSABLE_SELECTOR)
+          .forEach(focusable => { focusable.inert = inert; });
+      });
+    return;
+  }
+
+  appContainer.inert = inert;
+}
+
+function openModal(dialog, options = {}) {
+  if (activeModal && activeModal.dialog !== dialog) {
+    closeModal(activeModal.dialog, { restoreFocus: false });
+  }
+
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  setAppBackgroundInert(dialog, true);
+  activeModal = { dialog, previousFocus };
+
+  const focusTarget = options.initialFocus || visibleFocusableElements(dialog)[0] || dialog;
+  focusTarget.focus({ preventScroll: true });
+}
+
+function closeModal(dialog, options = {}) {
+  if (!activeModal || activeModal.dialog !== dialog) return;
+
+  const previousFocus = activeModal.previousFocus;
+  activeModal = null;
+  setAppBackgroundInert(dialog, false);
+
+  if (options.restoreFocus !== false && previousFocus && document.contains(previousFocus)) {
+    previousFocus.focus({ preventScroll: true });
+  }
+}
+
+document.addEventListener('keydown', event => {
+  if (!activeModal || event.key !== 'Tab') return;
+
+  const focusable = visibleFocusableElements(activeModal.dialog);
+  const fallback = activeModal.dialog;
+  if (focusable.length === 0) {
+    event.preventDefault();
+    fallback.focus({ preventScroll: true });
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+
+  if (event.shiftKey && (active === first || active === activeModal.dialog)) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+});
+
+function showLoginDialog() {
+  loginOverlay.style.display = 'flex';
+  openModal(loginOverlay, { initialFocus: document.getElementById('loginUsername') });
+}
+
+function closeLoginDialog() {
+  loginOverlay.style.display = 'none';
+  closeModal(loginOverlay);
+}
+
+function showProcessingDialog() {
+  overlay.classList.add('visible');
+  openModal(overlay);
+}
+
+function closeProcessingDialog(options) {
+  overlay.classList.remove('visible');
+  closeModal(overlay, options);
+}
+
+window.showLoginDialog = showLoginDialog;
+window.closeLoginDialog = closeLoginDialog;
+window.showProcessingDialog = showProcessingDialog;
+window.closeProcessingDialog = closeProcessingDialog;
+window.isLocalhost = isLocalhost;
+
+document.getElementById('loginForm').addEventListener('submit', handleLogin);
+
+initModeSwitch();
+
+const waitingMessages = [
+  "Reticulating splines...",
+  "Herding pixels...",
+  "Teaching the canvas to hold still...",
+  "Warming up the JPEG engine...",
+  "Counting to infinity (almost there)...",
+  "Your banner is doing its morning stretches...",
+  "Applying digital lipstick...",
+  "Convincing the browser to cooperate...",
+  "Dealing with Adobe's ghosts...",
+  "You look nice today, by the way.",
+  "That's a quality banner you've got there.",
+  "I'd swipe right on this banner.",
+  "This banner is more optimized than my life choices.",
+  "Your taste in creatives is impeccable.",
+  "Sharpening the pixels...",
+  "Making it pop (professionally)...",
+  "Feeding the color palette...",
+  "This is the hardest-working GIF on the internet.",
+  "If this were a movie, we'd be at the montage part.",
+  "Brewing digital coffee...",
+  "Resisting the urge to loop forever...",
+  "We've traced the problem to a faulty TCP packet. Just kidding.",
+  "Compressing with the power of a thousand suns...",
+  "Still faster than waiting for a designer to name their layers.",
+  "Almost done! (No, really, this time for sure.)",
+  "Putting the 'pro' in 'processing'...",
+  "The animators are working overtime.",
+  "Tickling the canvas pixels...",
+  "Your backup is being gently lowered into JPEG format.",
+  "Go make some tea. Or coffee. Or a daiquiri. I don't judge.",
+];
+
+let waitingInterval = null;
+
+// ---------------------------------------------------------------------------
+// Drop / file picker
+// ---------------------------------------------------------------------------
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFiles(e.dataTransfer.files); });
+fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+backupModeBtn.addEventListener('click', () => setMode('backup'));
+validatorModeBtn.addEventListener('click', () => setMode('validator'));
+validatorDropZone.addEventListener('click', () => validatorFileInput.click());
+validatorDropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); validatorFileInput.click(); } });
+validatorDropZone.addEventListener('dragover', e => { e.preventDefault(); validatorDropZone.classList.add('dragover'); });
+validatorDropZone.addEventListener('dragleave', () => validatorDropZone.classList.remove('dragover'));
+validatorDropZone.addEventListener('drop', e => { e.preventDefault(); validatorDropZone.classList.remove('dragover'); handleValidatorFiles(e.dataTransfer.files); });
+validatorFileInput.addEventListener('change', () => handleValidatorFiles(validatorFileInput.files));
+
+// ---------------------------------------------------------------------------
+// Error code → user-friendly message map
+// ---------------------------------------------------------------------------
+
+const ERROR_HELP = {
+  NO_FILES: 'Select at least one .zip, .riv, or video file.',
+  INVALID_FILE_TYPE: 'Only .zip, .riv, and video files (.mp4, .webm, .mov) are accepted.',
+  UNSAFE_FILENAME: 'The file name contains invalid characters. Rename it and try again.',
+  FILE_TOO_LARGE: 'The file exceeds the 200 MB size limit. Compress or split it.',
+  RATE_LIMITED: 'Too many requests. Wait a moment and try again.',
+  NOTHING_TO_RETRY: 'There are no failed files to retry.',
+  INVALID_STATE: 'The job cannot be retried in its current state.',
+  BAD_REQUEST: 'The request was malformed. Try uploading again.',
+  UPLOAD_ERROR: 'The upload could not be processed. Try again.',
+  ALREADY_PROCESSING: 'This job is already being processed. Wait for it to complete.',
+};
+
+const ERROR_LABELS = {
+  NO_FILES: 'No files',
+  INVALID_FILE_TYPE: 'Unsupported type',
+  UNSAFE_FILENAME: 'Unsafe name',
+  FILE_TOO_LARGE: 'File too large',
+  RATE_LIMITED: 'Rate limited',
+  NOTHING_TO_RETRY: 'Nothing to retry',
+  MALFORMED_CREATIVE: 'Malformed creative',
+  MISSING_HTML: 'Missing HTML',
+  INVALID_DIMENSIONS: 'Invalid dimensions',
+  CREATIVE_LOAD_FAILURE: 'Load failure',
+  BLANK_CANVAS: 'Blank canvas',
+  EXTRACTION_ERROR: 'Extraction error',
+  VIDEO_PROCESSING_ERROR: 'Video error',
+  UNKNOWN: 'Error',
+};
+
+function friendlyErrorLabel(code) {
+  return ERROR_LABELS[code] || ERROR_LABELS.UNKNOWN;
+}
+
+function plural(count, singular, pluralForm = `${singular}s`) {
+  return count === 1 ? singular : pluralForm;
+}
+
+function readableFileType(type) {
+  switch (type) {
+    case 'zip': return 'ZIP file';
+    case 'riv': return 'RIV file';
+    case 'video': return 'video file';
+    default: return `${type} file`;
+  }
+}
+
+function readableFileState(file) {
+  const state = file.state || 'uploaded';
+  if (state === 'complete') return 'done';
+  if (state === 'failed' && file.error) return `failed: ${file.error}`;
+  return state;
+}
+
+function fileStatusSummary(file) {
+  return `${file.name}, ${readableFileType(file.type)}, ${readableFileState(file)}`;
+}
+
+function setProgress(percent) {
+  const clamped = Math.max(0, Math.min(Math.round(percent), 100));
+  progressFill.style.width = `${clamped}%`;
+  overlayProgressFill.style.width = `${clamped}%`;
+  progressBar.setAttribute('aria-valuenow', String(clamped));
+  overlayProgressBar.setAttribute('aria-valuenow', String(clamped));
+}
+
+function readyMessage(count) {
+  return `${count} ${plural(count, 'file')} ready. Review file status, then generate backups.`;
+}
+
+function processingMessage(doneCount, total) {
+  return `Processing ${doneCount} of ${total} ${plural(total, 'file')}.`;
+}
+
+function completeMessage(successCount, failCount) {
+  return `Complete. ${successCount} ${plural(successCount, 'file')} succeeded, ${failCount} failed.`;
+}
+
+function setMode(mode) {
+  const validator = mode === 'validator';
+  backupPanel.classList.toggle('hidden', validator);
+  validatorPanel.classList.toggle('hidden', !validator);
+  backupModeBtn.classList.toggle('active', !validator);
+  validatorModeBtn.classList.toggle('active', validator);
+  backupModeBtn.setAttribute('aria-selected', String(!validator));
+  validatorModeBtn.setAttribute('aria-selected', String(validator));
+}
+
+function isLocalhost(hostname = window.location.hostname) {
+  return hostname === 'localhost'
+    || hostname === '127.0.0.1'
+    || hostname === '::1'
+    || hostname.endsWith('.localhost');
+}
+
+function initModeSwitch() {
+  if (isLocalhost()) {
+    modeSwitch.classList.remove('hidden');
+    return;
+  }
+
+  modeSwitch.classList.add('hidden');
+  setMode('backup');
+}
+
+function setValidatorProgress(percent) {
+  const clamped = Math.max(0, Math.min(Math.round(percent), 100));
+  validatorProgressFill.style.width = `${clamped}%`;
+  validatorProgressBar.setAttribute('aria-valuenow', String(clamped));
+}
+
+function validatorFileSummary(file) {
+  return `${file.fileName}, ${readableFileType(file.fileType)}, ${file.status}`;
+}
+
+function validationCompleteMessage(job) {
+  return `Validation complete. ${job.overall.errors} ${plural(job.overall.errors, 'error')} and ${job.overall.warnings} ${plural(job.overall.warnings, 'warning')}.`;
+}
+
+async function parseApiResponse(response, fallbackMessage) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    await response.text();
+    throw new Error('The server returned HTML instead of validator API JSON. Check that the deployed backend includes the validator routes.');
+  }
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error || fallbackMessage);
+  }
+
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// File handling
+// ---------------------------------------------------------------------------
+
+function handleFiles(files) {
+  const newFiles = Array.from(files).filter(f => /\.(zip|riv|mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(f.name));
+  if (newFiles.length === 0) {
+    showToast('Only .zip, .riv, and video files are supported.', 'warn');
+    return;
+  }
+
+  if (completed) {
+    resetUI();
+  }
+
+  const existingNames = new Set(sessionFiles.map(f => f.name));
+  const trulyNew = newFiles.filter(f => !existingNames.has(f.name));
+  if (trulyNew.length === 0) return;
+
+  const form = new FormData();
+  trulyNew.forEach(f => form.append('files', f));
+
+  processBtn.disabled = true;
+  errorSummary.classList.remove('visible');
+
+  fetch('/api/v1/jobs', { method: 'POST', body: form })
+    .then(r => {
+      if (!r.ok) return r.json().then(err => { throw new Error(err.error || 'Upload failed'); });
+      return r.json();
+    })
+    .then(data => {
+      sessionId = data.jobId;
+      const mapped = data.files.map(f => ({
+        id: f.fileId,
+        name: f.fileName,
+        type: f.fileType,
+        state: f.state,
+        error: f.error || null
+      }));
+      sessionFiles = [...sessionFiles, ...mapped];
+      renderFileList();
+      progressWrap.classList.add('visible');
+      setProgress(0);
+      progressText.textContent = readyMessage(sessionFiles.length);
+      processBtn.disabled = false;
+    })
+    .catch(err => {
+      showToast(err.message, 'error');
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function renderFileList() {
+  fileList.classList.add('visible');
+  fileList.innerHTML = '';
+  sessionFiles.forEach(f => {
+    const ext = f.type;
+    const state = f.state || 'uploaded';
+    const div = document.createElement('div');
+    div.className = 'file-item';
+    div.dataset.fileId = f.id;
+    div.setAttribute('role', 'listitem');
+    div.setAttribute('aria-label', fileStatusSummary(f));
+
+    div.innerHTML = `
+      <div class="file-item-col">
+        <div class="file-item-row">
+          <span class="file-type-badge ${ext}">${ext}</span>
+          <span class="file-name">${escapeHtml(f.name)}</span>
+        </div>
+        <div class="file-error" id="err-${escapeHtml(f.id)}"></div>
+      </div>
+      <span class="state-badge ${state}" id="badge-${escapeHtml(f.id)}">${stateBadgeContent(state)}</span>
+    `;
+    fileList.appendChild(div);
+
+    if (state === 'failed' && f.error) {
+      showFileError(f.id, f.error);
+    }
+  });
+}
+
+function stateBadgeContent(state) {
+  switch (state) {
+    case 'uploaded': return 'uploaded';
+    case 'queued': return 'queued';
+    case 'processing': return '<span class="spinner"></span> processing';
+    case 'complete': return '<span class="check">&#10003;</span> done';
+    case 'failed': return '<span class="cross">&#10007;</span> failed';
+    case 'skipped': return 'skipped';
+    default: return state;
+  }
+}
+
+function updateFileState(fileId, newState, errorMsg) {
+  const f = sessionFiles.find(x => x.id === fileId);
+  if (!f) return;
+  f.state = newState;
+  if (errorMsg) f.error = errorMsg;
+
+  const badge = document.getElementById('badge-' + fileId);
+  if (badge) {
+    badge.innerHTML = stateBadgeContent(newState);
+    badge.className = 'state-badge ' + newState;
+  }
+
+  const item = document.querySelector(`[data-file-id="${CSS.escape(fileId)}"]`);
+  if (item) {
+    item.setAttribute('aria-label', fileStatusSummary(f));
+  }
+
+  if (newState === 'failed' && errorMsg) {
+    showFileError(fileId, errorMsg);
+  } else if (newState !== 'failed') {
+    clearFileError(fileId);
+  }
+}
+
+function showFileError(fileId, msg) {
+  const el = document.getElementById('err-' + fileId);
+  if (!el) return;
+  el.textContent = msg;
+}
+
+function clearFileError(fileId) {
+  const el = document.getElementById('err-' + fileId);
+  if (el) el.textContent = '';
+}
+
+function renderValidatorFiles() {
+  validatorFileList.classList.add('visible');
+  validatorFileList.innerHTML = '';
+
+  validatorFiles.forEach(file => {
+    const div = document.createElement('div');
+    div.className = 'file-item validator-file-item';
+    div.setAttribute('role', 'listitem');
+    div.setAttribute('aria-label', validatorFileSummary(file));
+    div.innerHTML = `
+      <div class="file-item-col">
+        <div class="file-item-row">
+          <span class="file-type-badge ${escapeHtml(file.fileType)}">${escapeHtml(file.fileType)}</span>
+          <span class="file-name">${escapeHtml(file.fileName)}</span>
+        </div>
+      </div>
+      <span class="state-badge ${escapeHtml(file.status)}">${escapeHtml(file.status)}</span>
+    `;
+    validatorFileList.appendChild(div);
+  });
+}
+
+const VALIDATOR_CHECKS = [
+  {
+    id: 'package-size',
+    appliesTo: ['zip'],
+    label: 'Package size',
+    pass: 'Package size is within the selected preset limit.',
+    codes: ['PACKAGE_TOO_LARGE']
+  },
+  {
+    id: 'zip-extraction',
+    appliesTo: ['zip'],
+    label: 'ZIP extraction',
+    pass: 'ZIP structure was readable and extracted safely.',
+    codes: ['ZIP_EXTRACTION_FAILED']
+  },
+  {
+    id: 'html-entry',
+    appliesTo: ['zip'],
+    label: 'HTML entry',
+    pass: 'An HTML entry point was found.',
+    codes: ['MISSING_HTML']
+  },
+  {
+    id: 'dimensions',
+    appliesTo: ['zip', 'video', 'riv'],
+    label: 'Dimensions',
+    pass: 'Creative dimensions were detected.',
+    codes: ['VIDEO_DIMENSIONS_MISSING', 'RIVE_DIMENSIONS_MISSING']
+  },
+  {
+    id: 'renderability',
+    appliesTo: ['zip'],
+    label: 'Render smoke check',
+    pass: 'The HTML rendered without fatal browser errors and was sampled after a short delay.',
+    codes: ['RENDER_FAILED', 'BLANK_RENDER']
+  },
+  {
+    id: 'clicktag',
+    appliesTo: ['zip'],
+    label: 'clickTag',
+    pass: 'Required clickTag handling is present or not required for this preset.',
+    codes: ['MISSING_CLICKTAG']
+  },
+  {
+    id: 'external-references',
+    appliesTo: ['zip'],
+    label: 'External references',
+    pass: 'No disallowed external asset references were detected.',
+    codes: ['EXTERNAL_REFERENCE']
+  },
+  {
+    id: 'file-types',
+    appliesTo: ['zip', 'video', 'riv'],
+    label: 'Allowed file types',
+    pass: 'All checked files match the selected preset and supported extensions.',
+    codes: ['UNSUPPORTED_FILE_TYPE', 'PRESET_FILE_TYPE_MISMATCH']
+  },
+  {
+    id: 'rive-wrapper',
+    appliesTo: ['riv'],
+    label: 'Rive wrapper',
+    pass: 'Rive wrapper HTML can be generated.',
+    codes: ['RIVE_WRAPPER_FAILED']
+  },
+  {
+    id: 'video-probe',
+    appliesTo: ['video'],
+    label: 'Video probe',
+    pass: 'Video metadata was readable.',
+    codes: ['VIDEO_PROBE_FAILED']
+  },
+  {
+    id: 'video-duration',
+    appliesTo: ['video'],
+    label: 'Video duration',
+    pass: 'Video duration is within the selected preset limit.',
+    codes: ['VIDEO_DURATION_LONG']
+  },
+  {
+    id: 'video-bitrate',
+    appliesTo: ['video'],
+    label: 'Video bitrate',
+    pass: 'Video bitrate is within the validator threshold.',
+    codes: ['VIDEO_BITRATE_HIGH']
+  },
+  {
+    id: 'video-audio',
+    appliesTo: ['video'],
+    label: 'Audio stream',
+    pass: 'No audio stream was detected.',
+    codes: ['VIDEO_HAS_AUDIO']
+  },
+  {
+    id: 'video-loudness',
+    appliesTo: ['video'],
+    label: 'Audio loudness',
+    pass: 'Audio loudness is within the validator threshold or not applicable.',
+    codes: ['VIDEO_LOUDNESS_HIGH']
+  },
+  {
+    id: 'validation-runtime',
+    appliesTo: ['zip', 'video', 'riv'],
+    label: 'Validation runtime',
+    pass: 'The validator completed without an unexpected runtime error.',
+    codes: ['VALIDATION_ERROR']
+  }
+];
+
+function checkStatusFromFindings(findings) {
+  if (findings.some(finding => finding.severity === 'error')) return 'fail';
+  if (findings.some(finding => finding.severity === 'warning' || finding.severity === 'info')) return 'warning';
+  return 'pass';
+}
+
+function buildCheckRows(file) {
+  const findings = file.findings || [];
+  return VALIDATOR_CHECKS
+    .filter(check => check.appliesTo.includes(file.fileType))
+    .map(check => {
+      const matchedFindings = findings.filter(finding => check.codes.includes(finding.code));
+      return {
+        ...check,
+        status: checkStatusFromFindings(matchedFindings),
+        findings: matchedFindings
+      };
+    });
+}
+
+function renderCheckRow(check) {
+  const details = check.findings.length > 0
+    ? check.findings.map(finding => `
+      <div class="finding-detail">
+        <div class="finding-message">${escapeHtml(finding.message)}</div>
+        <div class="finding-suggestion">${escapeHtml(finding.suggestion)}</div>
+      </div>
+    `).join('')
+    : `<div class="finding-message">${escapeHtml(check.pass)}</div>`;
+
+  return `
+    <div class="check-row check-${escapeHtml(check.status)}">
+      <span class="check-status ${escapeHtml(check.status)}">${escapeHtml(check.status)}</span>
+      <div class="check-body">
+        <div class="finding-title">${escapeHtml(check.label)}</div>
+        ${details}
+      </div>
+    </div>
+  `;
+}
+
+function renderValidatorReport(job) {
+  const fileReports = job.files.map(file => {
+    const checkItems = buildCheckRows(file).map(renderCheckRow).join('');
+
+    return `
+      <section class="validator-file-report">
+        <h3>${escapeHtml(file.fileName)} · ${escapeHtml(file.status)}</h3>
+        <div class="check-list" role="list" aria-label="Checks performed for ${escapeHtml(file.fileName)}">
+          ${checkItems}
+        </div>
+      </section>
+    `;
+  }).join('');
+
+  validatorReport.innerHTML = `
+    <h2>Validation ${escapeHtml(job.overall.status)}</h2>
+    <p class="progress-text">Preset: ${escapeHtml(job.preset)}</p>
+    ${fileReports}
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Error summary banner
+// ---------------------------------------------------------------------------
+
+function showErrorSummary(message) {
+  errorSummary.textContent = message;
+  errorSummary.classList.add('visible');
+}
+
+function hideErrorSummary() {
+  errorSummary.textContent = '';
+  errorSummary.classList.remove('visible');
+}
+
+// ---------------------------------------------------------------------------
+// Toast notification (inline, non-blocking)
+// ---------------------------------------------------------------------------
+
+function showToast(message, type) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.setAttribute('role', 'alert');
+  toast.textContent = message;
+  Object.assign(toast.style, {
+    position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+    background: type === 'error' ? '#3b1515' : '#1f2d1f',
+    color: type === 'error' ? '#ef4444' : '#10b981',
+    padding: '12px 20px', borderRadius: '10px', fontSize: '0.875rem',
+    fontWeight: '500', zIndex: '2000', border: '1px solid ' + (type === 'error' ? '#4a1a1a' : '#1f3a1f'),
+    boxShadow: '0 4px 12px rgba(0,0,0,0.3)', maxWidth: '90vw',
+    transition: 'opacity .3s'
+  });
+  document.body.appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 4000);
+}
+
+// ---------------------------------------------------------------------------
+// Validator mode
+// ---------------------------------------------------------------------------
+
+function handleValidatorFiles(files) {
+  const accepted = Array.from(files).filter(f => /\.(zip|riv|mp4|webm|mov|avi|mkv|flv|wmv)$/i.test(f.name));
+  if (accepted.length === 0) {
+    showToast('Only .zip, .riv, and video files are supported.', 'warn');
+    return;
+  }
+
+  const form = new FormData();
+  accepted.forEach(f => form.append('files', f));
+  validateBtn.disabled = true;
+  validatorResetBtn.classList.add('hidden');
+  validatorReport.innerHTML = '';
+  validatorStatusText.textContent = 'Uploading files for validation.';
+  validatorProgressWrap.classList.add('visible');
+  setValidatorProgress(0);
+
+  fetch('/api/v1/validator/jobs', { method: 'POST', body: form })
+    .then(r => parseApiResponse(r, 'Upload failed'))
+    .then(job => {
+      validatorJobId = job.jobId;
+      validatorFiles = job.files;
+      renderValidatorFiles();
+      validatorStatusText.textContent = `${job.files.length} ${plural(job.files.length, 'file')} ready to validate.`;
+      validateBtn.disabled = false;
+    })
+    .catch(err => {
+      validatorStatusText.textContent = 'Upload failed.';
+      showToast(err.message, 'error');
+    });
+}
+
+validateBtn.addEventListener('click', startValidation);
+validatorResetBtn.addEventListener('click', resetValidatorUI);
+
+function startValidation() {
+  if (!validatorJobId) return;
+
+  validateBtn.disabled = true;
+  validatorResetBtn.classList.add('hidden');
+  validatorReport.innerHTML = '';
+  setValidatorProgress(0);
+  validatorStatusText.textContent = 'Starting validation.';
+
+  fetch(`/api/v1/validator/jobs/${validatorJobId}/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preset: validatorPreset.value })
+  })
+    .then(r => parseApiResponse(r, 'Validation failed'))
+    .then(job => {
+      validatorFiles = job.files;
+      renderValidatorFiles();
+      validatorPolling = true;
+      pollValidationStatus();
+    })
+    .catch(err => {
+      validateBtn.disabled = false;
+      validatorStatusText.textContent = 'Validation failed to start.';
+      showToast(err.message, 'error');
+    });
+}
+
+async function pollValidationStatus() {
+  while (validatorPolling) {
+    try {
+      const res = await fetch(`/api/v1/validator/jobs/${validatorJobId}?_=${Date.now()}`);
+      const job = await parseApiResponse(res, 'Validation status check failed');
+
+      validatorFiles = job.files || [];
+      renderValidatorFiles();
+
+      const pct = job.progress && job.progress.total > 0 ? job.progress.completed / job.progress.total * 100 : 0;
+      setValidatorProgress(pct);
+      validatorStatusText.textContent = job.status === 'complete'
+        ? validationCompleteMessage(job)
+        : `Validating ${job.progress.completed} of ${job.progress.total} ${plural(job.progress.total, 'file')}.`;
+
+      if (job.status === 'complete' || job.status === 'error') {
+        validatorPolling = false;
+        setValidatorProgress(100);
+        validatorStatusText.textContent = job.status === 'complete'
+          ? validationCompleteMessage(job)
+          : 'Validation failed.';
+        renderValidatorReport(job);
+        validatorResetBtn.classList.remove('hidden');
+        validatorResetBtn.focus();
+        return;
+      }
+    } catch {
+      validatorStatusText.textContent = 'Validation status check failed, retrying.';
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
+
+function resetValidatorUI() {
+  validatorJobId = null;
+  validatorFiles = [];
+  validatorPolling = false;
+  validatorFileInput.value = '';
+  validatorFileList.innerHTML = '';
+  validatorFileList.classList.remove('visible');
+  validatorReport.innerHTML = '';
+  validatorProgressWrap.classList.remove('visible');
+  validatorStatusText.textContent = '';
+  setValidatorProgress(0);
+  validateBtn.disabled = true;
+  validatorResetBtn.classList.add('hidden');
+}
+
+// ---------------------------------------------------------------------------
+// Polling / status
+// ---------------------------------------------------------------------------
+
+function updateAllFromServer(files) {
+  files.forEach(sf => {
+    const local = sessionFiles.find(x => x.id === sf.id);
+    if (local) {
+      local.state = sf.state;
+      if (sf.error) local.error = sf.error;
+    }
+  });
+  renderFileList();
+}
+
+// ---------------------------------------------------------------------------
+// Process / Retry / Download / Reset
+// ---------------------------------------------------------------------------
+
+processBtn.addEventListener('click', () => startProcessing());
+
+async function startProcessing() {
+  if (!sessionId) return;
+
+  processBtn.disabled = true;
+  downloadBtn.classList.add('hidden');
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
+  hideErrorSummary();
+  showProcessingDialog();
+  startWaitingText();
+  overlayProgressFill.style.width = '0%';
+  overlayProgressText.textContent = 'Starting...';
+  overlayFiles.innerHTML = '';
+  progressWrap.classList.add('visible');
+  setProgress(0);
+  progressText.textContent = 'Starting processing.';
+
+  sessionFiles.forEach(f => { if (f.state === 'uploaded') f.state = 'queued'; });
+  renderFileList();
+
+  const res = await fetch(`/api/v1/jobs/${sessionId}/process`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to start' }));
+    closeProcessingDialog();
+    stopWaitingText();
+    progressText.textContent = err.error || 'Failed to start processing';
+    processBtn.disabled = false;
+    return;
+  }
+
+  polling = true;
+  pollStatus();
+}
+
+retryBtn.addEventListener('click', () => startRetry());
+
+async function startRetry() {
+  if (!sessionId) return;
+
+  processBtn.disabled = true;
+  downloadBtn.classList.add('hidden');
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
+  hideErrorSummary();
+  showProcessingDialog();
+  startWaitingText();
+  overlayProgressFill.style.width = '0%';
+  overlayProgressText.textContent = 'Retrying failed files...';
+  overlayFiles.innerHTML = '';
+  progressWrap.classList.add('visible');
+  setProgress(0);
+  progressText.textContent = 'Retrying failed files...';
+
+  const res = await fetch(`/api/v1/jobs/${sessionId}/retry`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Retry failed', code: 'UNKNOWN' }));
+    closeProcessingDialog();
+    stopWaitingText();
+    progressText.textContent = err.error || 'Retry failed';
+
+    // Re-enable appropriate buttons based on previous state
+    const hasSuccess = sessionFiles.some(f => f.state === 'complete');
+    const hasFailures = sessionFiles.some(f => f.state === 'failed');
+    if (hasSuccess) downloadBtn.classList.remove('hidden');
+    if (hasFailures) retryBtn.classList.remove('hidden');
+    resetBtn.classList.remove('hidden');
+    processBtn.disabled = false;
+    return;
+  }
+
+  polling = true;
+  pollStatus();
+}
+
+async function pollStatus() {
+  while (polling) {
+    try {
+      const res = await fetch(`/api/v1/jobs/${sessionId}?_=${Date.now()}`);
+      const data = await res.json();
+
+      if (data.files) {
+        data.files.forEach(sf => {
+          updateFileState(sf.fileId, sf.state, sf.error);
+        });
+      }
+
+      const done = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : 0;
+      const total = data.progress ? data.progress.total : data.total;
+      const pct = total > 0 ? (done / total * 100) : 0;
+      setProgress(pct);
+
+      if (data.status === 'processing') {
+        const doneCount = data.files ? data.files.filter(f => f.state === 'complete' || f.state === 'failed').length : 0;
+        progressText.textContent = processingMessage(doneCount, total);
+        overlayProgressText.textContent = progressText.textContent;
+      }
+
+      if (data.files) {
+        overlayFiles.innerHTML = data.files.map(sf => {
+          const label = escapeHtml(sf.fileName);
+          const dotClass = sf.state || 'queued';
+          const status = escapeHtml(sf.state || 'queued');
+          return `<div class="overlay-file" role="listitem" aria-label="${label}, ${status}"><span class="status-dot ${dotClass}" aria-hidden="true"></span><span class="file-label">${label}</span><span class="sr-only">, ${status}</span></div>`;
+        }).join('');
+      }
+
+      if (data.status === 'complete') {
+        completed = true;
+        closeProcessingDialog({ restoreFocus: false });
+        stopWaitingText();
+        setProgress(100);
+
+        const successCount = data.files ? data.files.filter(f => f.state === 'complete').length : 0;
+        const failCount = data.files ? data.files.filter(f => f.state === 'failed').length : 0;
+        progressText.textContent = completeMessage(successCount, failCount);
+
+        if (failCount > 0 && successCount > 0) {
+          showErrorSummary(`${failCount} file(s) failed. The download ZIP includes an errors.json with details.`);
+        } else if (failCount > 0) {
+          showErrorSummary('All files failed. Check each file for the specific error.');
+        }
+
+        processBtn.classList.add('hidden');
+
+        if (successCount > 0) {
+          downloadBtn.classList.remove('hidden');
+          downloadBtn.focus();
+        }
+        if (failCount > 0 && data.canRetry) {
+          retryBtn.classList.remove('hidden');
+          retryBtn.textContent = `Retry failed (${failCount})`;
+        }
+        resetBtn.classList.remove('hidden');
+        if (successCount === 0) {
+          (data.canRetry ? retryBtn : resetBtn).focus();
+        }
+        polling = false;
+        return;
+      }
+
+      if (data.status === 'error') {
+        completed = true;
+        closeProcessingDialog();
+        stopWaitingText();
+        progressText.textContent = 'Processing failed';
+        showErrorSummary('An unexpected error occurred during processing.');
+        resetBtn.classList.remove('hidden');
+        polling = false;
+        return;
+      }
+    } catch (e) {
+      if (polling) {
+        progressText.textContent = 'Status check failed, retrying...';
+      }
+    }
+
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
+downloadBtn.addEventListener('click', startDownload);
+
+async function startDownload() {
+  if (!sessionId) return;
+
+  downloadBtn.disabled = true;
+  downloadBtn.textContent = 'Downloading...';
+
+  try {
+    const res = await fetch(`/api/v1/jobs/${sessionId}/download`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Download failed' }));
+      showToast(err.error || 'Download failed', 'error');
+      downloadBtn.textContent = 'Download ZIP';
+      downloadBtn.disabled = false;
+      return;
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backup-images-${sessionId}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    showToast('Download started', 'success');
+    await new Promise(r => setTimeout(r, 1500));
+    resetUI();
+  } catch (err) {
+    showToast('Download failed: network error', 'error');
+    downloadBtn.textContent = 'Download ZIP';
+    downloadBtn.disabled = false;
+  }
+}
+
+resetBtn.addEventListener('click', resetUI);
+
+function resetUI() {
+  sessionId = null;
+  sessionFiles = [];
+  completed = false;
+  fileList.classList.remove('visible');
+  fileList.innerHTML = '';
+  processBtn.classList.remove('hidden');
+  processBtn.disabled = true;
+  downloadBtn.classList.add('hidden');
+  downloadBtn.disabled = false;
+  downloadBtn.textContent = 'Download ZIP';
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
+  progressWrap.classList.remove('visible');
+  hideErrorSummary();
+}
+
+// ---------------------------------------------------------------------------
+// Waiting text
+// ---------------------------------------------------------------------------
+
+function startWaitingText() {
+  let i = 0;
+  waitingText.textContent = waitingMessages[i];
+  waitingInterval = setInterval(() => {
+    i = (i + 1) % waitingMessages.length;
+    waitingText.textContent = waitingMessages[i];
+  }, 3000);
+}
+
+function stopWaitingText() {
+  clearInterval(waitingInterval);
+  waitingInterval = null;
+  waitingText.textContent = '';
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// CSS.escape polyfill for older browsers
+if (!CSS.escape) {
+  CSS.escape = function(value) {
+    return String(value).replace(/([^\w-])/g, '\\$1');
+  };
+}

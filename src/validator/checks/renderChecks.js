@@ -1,7 +1,7 @@
 import path from 'path';
 import { pathToFileURL } from 'url';
-import { chromium } from 'playwright';
 import sharp from 'sharp';
+import { getBrowserPool } from '../../browserPool.js';
 import { buildFinding } from '../findings.js';
 
 const DEFAULT_RENDER_SAMPLE_DELAY_MS = 2000;
@@ -29,16 +29,19 @@ export async function checkRenderability({
     blank: null,
     sampleDelayMs
   };
-  let browser = null;
+  let lease = null;
+  let context = null;
 
   try {
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage({
+    const pool = getBrowserPool();
+    lease = await pool.acquire();
+    context = await lease.browser.newContext({
       viewport: {
         width: dimensions.width,
         height: dimensions.height
       }
     });
+    const page = await context.newPage();
     await page.goto(pathToFileURL(path.resolve(htmlPath)).href, {
       waitUntil: 'load',
       timeout: 10000
@@ -68,8 +71,11 @@ export async function checkRenderability({
       path: displayPath
     }));
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    if (lease) {
+      getBrowserPool().release(lease);
     }
   }
 
