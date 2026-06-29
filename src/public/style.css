@@ -241,6 +241,12 @@ body {
   background: var(--state-failed); color: #fff;
 }
 .btn-retry:hover:not(:disabled) { background: #dc2626; }
+.btn-cancel {
+  background: transparent; color: var(--text-soft);
+  border: 1px solid var(--border); margin-top: 0.75rem;
+  font-size: 0.8125rem; padding: 6px 16px;
+}
+.btn-cancel:hover:not(:disabled) { background: var(--bg-card); color: var(--text); }
 .hidden { display: none !important; }
 
 /* Mode switch */
@@ -374,6 +380,7 @@ body {
 .overlay-file .status-dot.failed { background: #ef4444; }
 .overlay-file .status-dot.fail,
 .overlay-file .status-dot.error { background: #ef4444; }
+.overlay-file .status-dot.skipped { background: var(--state-skip-text); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 .overlay-file .file-label {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

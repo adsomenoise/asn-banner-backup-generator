@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 
-export const JOB_STATUSES = ['uploaded', 'processing', 'complete', 'error'];
-export const FILE_STATES = ['uploaded', 'queued', 'processing', 'complete', 'failed'];
+export const JOB_STATUSES = ['uploaded', 'processing', 'complete', 'error', 'cancelled'];
+export const FILE_STATES = ['uploaded', 'queued', 'processing', 'complete', 'failed', 'skipped'];
 
 export class FileInfo {
   constructor(props = {}) {

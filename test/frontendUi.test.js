@@ -177,14 +177,16 @@ describe('Frontend processing UI', () => {
     await page.focus('#dropZone');
     await page.evaluate(() => window.showProcessingDialog());
 
-    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'overlay');
+    // cancelBtn is the first (and only) focusable element — receives initial focus
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'cancelBtn');
     assert.strictEqual(await page.locator('.container').getAttribute('inert'), '');
 
+    // Tab wraps within the single focusable element
     await page.keyboard.press('Tab');
-    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'overlay');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'cancelBtn');
 
     await page.keyboard.press('Shift+Tab');
-    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'overlay');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'cancelBtn');
 
     await page.evaluate(() => window.closeProcessingDialog());
     assert.strictEqual(await page.evaluate(() => document.activeElement.id), 'dropZone');

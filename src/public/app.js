@@ -120,6 +120,7 @@ const overlayProgressBar = document.getElementById('overlayProgressBar');
 const overlayProgressFill = document.getElementById('overlayProgressFill');
 const overlayProgressText = document.getElementById('overlayProgressText');
 const overlayFiles = document.getElementById('overlayFiles');
+const cancelBtn = document.getElementById('cancelBtn');
 const loginOverlay = document.getElementById('loginOverlay');
 const appContainer = document.querySelector('.container');
 const validatorPreset = document.getElementById('validatorPreset');
@@ -1026,6 +1027,8 @@ async function startProcessing() {
   downloadBtn.classList.add('hidden');
   retryBtn.classList.add('hidden');
   resetBtn.classList.add('hidden');
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = 'Cancel';
   hideErrorSummary();
   showProcessingDialog();
   startWaitingText();
@@ -1055,6 +1058,15 @@ async function startProcessing() {
 
 retryBtn.addEventListener('click', () => startRetry());
 
+cancelBtn.addEventListener('click', () => cancelProcessing());
+
+async function cancelProcessing() {
+  if (!sessionId) return;
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = 'Cancelling…';
+  await fetch(`/api/v1/jobs/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+}
+
 async function startRetry() {
   if (!sessionId) return;
 
@@ -1062,6 +1074,8 @@ async function startRetry() {
   downloadBtn.classList.add('hidden');
   retryBtn.classList.add('hidden');
   resetBtn.classList.add('hidden');
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = 'Cancel';
   hideErrorSummary();
   showProcessingDialog();
   startWaitingText();
@@ -1166,6 +1180,28 @@ async function pollStatus() {
         progressText.textContent = 'Processing failed';
         showErrorSummary('An unexpected error occurred during processing.');
         resetBtn.classList.remove('hidden');
+        polling = false;
+        return;
+      }
+
+      if (data.status === 'cancelled') {
+        completed = true;
+        closeProcessingDialog({ restoreFocus: false });
+        stopWaitingText();
+        processBtn.classList.add('hidden');
+
+        const skippedCount = data.files ? data.files.filter(f => f.state === 'skipped').length : 0;
+        const doneCount = data.files ? data.files.filter(f => f.state === 'complete').length : 0;
+        const failCount = data.files ? data.files.filter(f => f.state === 'failed').length : 0;
+        const retryable = skippedCount + failCount;
+        progressText.textContent = `Cancelled. ${doneCount} file${doneCount !== 1 ? 's' : ''} completed before cancellation.`;
+
+        if (retryable > 0) {
+          retryBtn.classList.remove('hidden');
+          retryBtn.textContent = `Retry (${retryable})`;
+        }
+        resetBtn.classList.remove('hidden');
+        (retryable > 0 ? retryBtn : resetBtn).focus();
         polling = false;
         return;
       }

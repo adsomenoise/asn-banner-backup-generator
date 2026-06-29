@@ -114,6 +114,7 @@ const globalCap = new Semaphore(MAX_CONCURRENT);
 const jobStore = new InMemoryJobStore();
 const validatorStore = new ValidatorStore();
 const validatorCleanupInProgress = new Set();
+const jobAbortControllers = new Map();
 
 function newId() {
   return crypto.randomUUID().slice(0, 8);
@@ -317,6 +318,10 @@ async function processJob(jobId) {
   const job = await jobStore.get(jobId);
   if (!job) return;
 
+  const controller = new AbortController();
+  const { signal } = controller;
+  jobAbortControllers.set(jobId, controller);
+
   const log = logger.child({ module: 'processJob', jobId });
   const jobStart = Date.now();
 
@@ -340,6 +345,14 @@ async function processJob(jobId) {
       .filter(f => f.state === 'queued')
       .map(async (file) => {
       await globalCap.acquire();
+
+      if (signal.aborted) {
+        globalCap.release();
+        file.setState('skipped');
+        await jobStore.update(jobId, { files: job.files });
+        return null;
+      }
+
       const fileWorkDir = getFileWorkDir(job, file);
       let sanitized = '';
       let keepDir = false;
@@ -448,6 +461,12 @@ async function processJob(jobId) {
     const results = (await Promise.all(tasks)).filter(Boolean);
     job.results.push(...results);
 
+    if (signal.aborted) {
+      log.info('Job cancelled — skipping ZIP build');
+      metrics.increment('job.cancelled');
+      return;
+    }
+
     log.info('All files processed', {
       total: job.files.length,
       completed: results.length,
@@ -504,12 +523,14 @@ async function processJob(jobId) {
     metrics.timing('job.duration', jobDuration);
     metrics.increment('job.complete');
   } catch (err) {
+    if (signal.aborted) return;
     log.error('Failed to build output ZIP', { error: err.message });
     job.setStatus('error');
     job.errors.push({ file: 'output', error: `Failed to build ZIP: ${err.message}`, friendly: 'Could not package the output files. Try again.' });
     await jobStore.update(jobId, { status: job.status, errors: job.errors });
     metrics.increment('job.failed', { reason: 'zip_build_error' });
   } finally {
+    jobAbortControllers.delete(jobId);
     await stopFileServer(fileServer);
   }
 }
@@ -867,6 +888,28 @@ async function handleDownload(req, res) {
   });
 }
 
+async function handleCancelJob(req, res) {
+  const job = await jobStore.get(req.params.jobId);
+  const auth = req.auth || {};
+  const log = logger.child({ module: 'handleCancelJob', jobId: req.params.jobId, userId: auth.userId });
+
+  if (!assertOwnership(job, auth, res)) return;
+
+  if (job.status !== 'processing') {
+    return res.status(409).json(errorBody('Job is not currently processing', 'INVALID_STATE'));
+  }
+
+  const controller = jobAbortControllers.get(job.id);
+  if (controller) controller.abort();
+
+  job.setStatus('cancelled');
+  await jobStore.update(job.id, { status: job.status, updatedAt: job.updatedAt, files: job.files });
+
+  log.info('Job cancelled by user');
+  metrics.increment('job.cancelled_by_user');
+  res.json(job.toJSON());
+}
+
 async function handleRetry(req, res) {
   const job = await jobStore.get(req.params.jobId);
   const auth = req.auth || {};
@@ -877,14 +920,14 @@ async function handleRetry(req, res) {
     return;
   }
 
-  if (job.status !== 'complete' && job.status !== 'error') {
+  if (job.status !== 'complete' && job.status !== 'error' && job.status !== 'cancelled') {
     log.warn('Retry request for non-terminal job', { status: job.status });
-    return res.status(400).json(errorBody('Job must be complete or errored to retry', 'INVALID_STATE'));
+    return res.status(400).json(errorBody('Job must be complete, errored, or cancelled to retry', 'INVALID_STATE'));
   }
 
   let retryCount = 0;
   for (const f of job.files) {
-    if (f.state === 'failed') {
+    if (f.state === 'failed' || f.state === 'skipped') {
       f.setState('uploaded');
       f.setState('queued');
       retryCount++;
@@ -893,7 +936,7 @@ async function handleRetry(req, res) {
 
   if (retryCount === 0) {
     log.warn('No files to retry');
-    return res.status(400).json(errorBody('No failed files to retry', 'NOTHING_TO_RETRY'));
+    return res.status(400).json(errorBody('No failed or skipped files to retry', 'NOTHING_TO_RETRY'));
   }
 
   job.setStatus('processing');
@@ -1134,6 +1177,8 @@ export async function startWebServer(port = 3001, opts = {}) {
   }, upload.array('files'), handleUpload);
 
   v1.post('/jobs/:jobId/process', rateLimiter, handleStartProcessing);
+
+  v1.delete('/jobs/:jobId', handleCancelJob);
 
   v1.post('/jobs/:jobId/retry', rateLimiter, handleRetry);
 

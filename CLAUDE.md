@@ -212,7 +212,7 @@ Full details + evidence in `docs/audit-2026-06-26.md`.
 | UX-1 | Validator mode hidden on non-localhost — `isLocalhost()` guard in `initModeSwitch()` | `app.js` | Medium |
 | ~~UX-2~~ | ~~No file size shown in the uploaded files list~~ | ~~`index.html`~~ | ~~Low~~ ✅ |
 | ~~UX-3~~ | ~~Download triggers immediate cleanup even on network failure (see CQ-10)~~ | ~~`webServer.js:792`~~ | ~~Medium~~ ✅ |
-| UX-4 | No way to cancel in-progress processing | — | Low |
+| ~~UX-4~~ | ~~No way to cancel in-progress processing~~ | ~~—~~ | ~~Low~~ ✅ |
 | UX-5 | Upload limits (200 MB, 50 files) not shown in the drop zone hint | `index.html` | Low |
 | UX-6 | Polling uses fixed interval (1 s backup, 500 ms validator) — no backoff | `app.js` | Low |
 
