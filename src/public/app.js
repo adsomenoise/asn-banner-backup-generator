@@ -425,6 +425,32 @@ function validationCompleteMessage(job) {
   return `Validation complete. ${job.overall.errors} ${plural(job.overall.errors, 'error')} and ${job.overall.warnings} ${plural(job.overall.warnings, 'warning')}.`;
 }
 
+// XHR-based upload with progress tracking.
+// Auth headers are injected from the same session storage as the fetch wrapper above.
+function xhrUpload(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    const auth = getAuth();
+    if (auth) {
+      xhr.setRequestHeader('x-user-id', auth.userId);
+      xhr.setRequestHeader('x-tenant-id', auth.tenantId);
+      xhr.setRequestHeader('x-client-id', auth.clientId);
+    }
+    xhr.upload.addEventListener('progress', event => {
+      if (event.lengthComputable) onProgress(event.loaded / event.total * 100);
+    });
+    xhr.addEventListener('load', () => {
+      let body = null;
+      try { body = JSON.parse(xhr.responseText); } catch {}
+      resolve({ status: xhr.status, body });
+    });
+    xhr.addEventListener('error', () => reject(new Error('Network error during upload')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+    xhr.send(formData);
+  });
+}
+
 async function parseApiResponse(response, fallbackMessage) {
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
@@ -464,11 +490,18 @@ function handleFiles(files) {
 
   processBtn.disabled = true;
   errorSummary.classList.remove('visible');
+  progressWrap.classList.add('visible');
+  setProgress(0);
+  progressText.textContent = 'Uploading...';
 
-  fetch('/api/v1/jobs', { method: 'POST', body: form })
-    .then(r => {
-      if (!r.ok) return r.json().then(err => { throw new Error(err.error || 'Upload failed'); });
-      return r.json();
+  xhrUpload('/api/v1/jobs', form, pct => {
+    setProgress(pct);
+    progressText.textContent = `Uploading... ${Math.round(pct)}%`;
+  })
+    .then(({ status, body }) => {
+      if (!body) throw new Error('Upload failed');
+      if (status >= 400) throw new Error(body.error || 'Upload failed');
+      return body;
     })
     .then(data => {
       sessionId = data.jobId;
@@ -481,12 +514,18 @@ function handleFiles(files) {
       }));
       sessionFiles = [...sessionFiles, ...mapped];
       renderFileList();
-      progressWrap.classList.add('visible');
       setProgress(0);
       progressText.textContent = readyMessage(sessionFiles.length);
       processBtn.disabled = false;
     })
     .catch(err => {
+      if (sessionFiles.length === 0) {
+        progressWrap.classList.remove('visible');
+      } else {
+        setProgress(0);
+        progressText.textContent = readyMessage(sessionFiles.length);
+        processBtn.disabled = false;
+      }
       showToast(err.message, 'error');
     });
 }
@@ -819,16 +858,24 @@ function handleValidatorFiles(files) {
   validateBtn.disabled = true;
   validatorResetBtn.classList.add('hidden');
   validatorReport.innerHTML = '';
-  validatorStatusText.textContent = 'Uploading files for validation.';
+  validatorStatusText.textContent = 'Uploading...';
   validatorProgressWrap.classList.add('visible');
   setValidatorProgress(0);
 
-  fetch('/api/v1/validator/jobs', { method: 'POST', body: form })
-    .then(r => parseApiResponse(r, 'Upload failed'))
+  xhrUpload('/api/v1/validator/jobs', form, pct => {
+    setValidatorProgress(pct);
+    validatorStatusText.textContent = `Uploading... ${Math.round(pct)}%`;
+  })
+    .then(({ status, body }) => {
+      if (!body) throw new Error('The server returned HTML instead of validator API JSON. Check that the deployed backend includes the validator routes.');
+      if (status >= 400) throw new Error(body.error || 'Upload failed');
+      return body;
+    })
     .then(job => {
       validatorJobId = job.jobId;
       validatorFiles = job.files;
       renderValidatorFiles();
+      setValidatorProgress(0);
       validatorStatusText.textContent = `${job.files.length} ${plural(job.files.length, 'file')} ready to validate.`;
       validateBtn.disabled = false;
     })
