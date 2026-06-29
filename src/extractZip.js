@@ -103,36 +103,43 @@ export async function extractZip(zipPath, tempDir, options = {}) {
 }
 
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+const RIV_MAGIC = Buffer.from([0x52, 0x49, 0x56, 0x45]); // "RIVE"
+
+// File types that can be individually processed by the pipeline.
+// Matches the multer fileFilter accept list in webServer.js.
+const PROCESSABLE_RE = /\.(zip|riv|mp4|webm|mov|avi|mkv|flv|wmv)$/i;
 
 /**
- * Returns true if the ZIP at zipPath looks like a batch container: it has inner
- * .zip entries but no .html entries. This distinguishes a "ZIP-of-ZIPs" from a
- * normal banner ZIP that might also include a .zip asset.
+ * Returns true if the ZIP at zipPath looks like a batch container: it holds
+ * individually-processable files (ZIPs, .riv, videos) but no HTML entry point.
+ * This distinguishes a batch ZIP from a banner ZIP that might also bundle
+ * a .zip or video as an asset alongside its index.html.
  */
 export function isContainerZip(zipPath) {
   try {
     const zip = new AdmZip(zipPath);
     const entries = zip.getEntries().filter(e => !e.isDirectory && !shouldIgnore(e.entryName));
-    const hasInnerZips = entries.some(e => /\.zip$/i.test(e.entryName));
+    const hasProcessable = entries.some(e => PROCESSABLE_RE.test(e.entryName));
     const hasHtml = entries.some(e => /\.html?$/i.test(e.entryName));
-    return hasInnerZips && !hasHtml;
+    return hasProcessable && !hasHtml;
   } catch {
     return false;
   }
 }
 
 /**
- * Extracts inner ZIP entries from a container ZIP into uploadDir.
- * Each inner entry is magic-byte validated before being written.
- * Duplicate basenames are disambiguated with a _N suffix.
- * Returns an array of { name, path, size } for each extracted inner ZIP.
+ * Extracts individually-processable entries (ZIPs, .riv, videos) from a
+ * container ZIP into uploadDir.  ZIP and .riv entries are magic-byte
+ * validated before being written; video entries are not (consistent with
+ * direct-upload behaviour).  Duplicate basenames are disambiguated with a
+ * _N suffix.  Returns an array of { name, path, size } for each written file.
  */
 export async function expandContainerZip(zipPath, uploadDir, options = {}) {
   const maxInner = options.maxInner || 50;
   const zip = new AdmZip(zipPath);
   const entries = zip.getEntries().filter(e =>
     !e.isDirectory &&
-    /\.zip$/i.test(e.entryName) &&
+    PROCESSABLE_RE.test(e.entryName) &&
     !shouldIgnore(e.entryName)
   );
 
@@ -143,7 +150,11 @@ export async function expandContainerZip(zipPath, uploadDir, options = {}) {
     if (result.length >= maxInner) break;
 
     const data = entry.getData();
-    if (data.length < 4 || !data.slice(0, 4).equals(ZIP_MAGIC)) continue;
+    const isZip = /\.zip$/i.test(entry.entryName);
+    const isRiv = /\.riv$/i.test(entry.entryName);
+
+    if (isZip && (data.length < 4 || !data.slice(0, 4).equals(ZIP_MAGIC))) continue;
+    if (isRiv && (data.length < 4 || !data.slice(0, 4).equals(RIV_MAGIC))) continue;
 
     let innerName = path.basename(entry.entryName);
     if (!innerName || innerName.includes('..')) continue;

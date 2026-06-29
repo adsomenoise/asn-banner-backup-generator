@@ -192,6 +192,28 @@ describe('isContainerZip', () => {
     await fs.remove(zipPath);
   });
 
+  it('returns true for a ZIP containing only video files', async () => {
+    const outer = new AdmZip();
+    outer.addFile('ad_300x250.mp4', Buffer.from('fake video data'));
+    outer.addFile('ad_728x90.mp4', Buffer.from('fake video data 2'));
+    const zipPath = path.join(TEST_TEMP, 'video-container.zip');
+    await fs.writeFile(zipPath, outer.toBuffer());
+
+    assert.strictEqual(isContainerZip(zipPath), true);
+    await fs.remove(zipPath);
+  });
+
+  it('returns true for a ZIP containing mixed videos and inner ZIPs', async () => {
+    const outer = new AdmZip();
+    outer.addFile('ad_300x250.mp4', Buffer.from('fake video data'));
+    outer.addFile('ad_728x90.zip', validInnerZipBuffer());
+    const zipPath = path.join(TEST_TEMP, 'mixed-container.zip');
+    await fs.writeFile(zipPath, outer.toBuffer());
+
+    assert.strictEqual(isContainerZip(zipPath), true);
+    await fs.remove(zipPath);
+  });
+
   it('returns false for a ZIP with no inner ZIPs', async () => {
     const zip = new AdmZip();
     zip.addFile('style.css', Buffer.from('body{}'));
@@ -272,6 +294,27 @@ describe('expandContainerZip', () => {
     const names = results.map(r => r.name);
     assert.ok(names.includes('banner.zip'));
     assert.ok(names.includes('banner_2.zip'));
+
+    await fs.remove(outerPath);
+    for (const r of results) await fs.remove(r.path).catch(() => {});
+  });
+
+  it('extracts video entries from a container ZIP', async () => {
+    const outer = new AdmZip();
+    outer.addFile('ad_300x250.mp4', Buffer.from('fake mp4 content'));
+    outer.addFile('ad_728x90.webm', Buffer.from('fake webm content'));
+    const outerPath = path.join(TEST_TEMP, 'video-batch.zip');
+    await fs.writeFile(outerPath, outer.toBuffer());
+
+    const results = await expandContainerZip(outerPath, TEST_TEMP);
+
+    assert.strictEqual(results.length, 2);
+    assert.ok(results.some(r => r.name === 'ad_300x250.mp4'));
+    assert.ok(results.some(r => r.name === 'ad_728x90.webm'));
+    for (const r of results) {
+      assert.ok(await fs.pathExists(r.path));
+      assert.ok(r.size > 0);
+    }
 
     await fs.remove(outerPath);
     for (const r of results) await fs.remove(r.path).catch(() => {});
