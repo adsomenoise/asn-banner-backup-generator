@@ -242,11 +242,12 @@ body {
 }
 .btn-retry:hover:not(:disabled) { background: #dc2626; }
 .btn-cancel {
-  background: transparent; color: var(--text-soft);
+  flex: none;
+  background: var(--bg-card); color: var(--text);
   border: 1px solid var(--border); margin-top: 0.75rem;
   font-size: 0.8125rem; padding: 6px 16px;
 }
-.btn-cancel:hover:not(:disabled) { background: var(--bg-card); color: var(--text); }
+.btn-cancel:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
 .hidden { display: none !important; }
 
 /* Mode switch */

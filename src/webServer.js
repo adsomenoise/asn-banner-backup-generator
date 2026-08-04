@@ -560,19 +560,17 @@ async function cleanupJob(job) {
 // Route handlers
 // ---------------------------------------------------------------------------
 
-async function handleUpload(req, res) {
-  const uploadStart = Date.now();
-  const files = req.files || [];
-  const auth = req.auth || {};
-  const log = logger.child({ module: 'handleUpload', userId: auth.userId, tenantId: auth.tenantId, clientId: auth.clientId });
-
-  if (files.length === 0) {
-    log.warn('Upload with no files', { code: 'NO_FILES' });
-    metrics.increment('upload.rejected', { reason: 'no_files' });
-    return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
+class UploadValidationError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
   }
+}
 
-  // Magic-byte validation for ZIP and Rive files
+// Magic-byte validation + container-ZIP expansion, shared between creating a job
+// and appending files to an existing one. Throws UploadValidationError on a bad
+// magic byte; does not enforce a max-file-count (callers know the right threshold).
+async function validateAndExpandUpload(files, log) {
   const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
   const RIV_MAGIC = Buffer.from([0x52, 0x49, 0x56, 0x45]); // "RIVE"
   for (const f of files) {
@@ -589,13 +587,13 @@ async function handleUpload(req, res) {
     if (!buf.equals(expected)) {
       log.warn(`Invalid ${label} magic bytes`, { fileName: f.originalname });
       metrics.increment('upload.rejected', { reason: 'bad_magic' });
-      return res.status(400).json(errorBody(`File "${f.originalname}" is not a valid ${label} file`, 'INVALID_FILE_TYPE'));
+      throw new UploadValidationError(`File "${f.originalname}" is not a valid ${label} file`, 'INVALID_FILE_TYPE');
     }
   }
 
   // Expand container ZIPs (a ZIP containing inner ZIP files, no HTML) into individual entries.
   // Each inner ZIP is magic-byte validated inside expandContainerZip before being written.
-  let allFiles = [];
+  const allFiles = [];
   for (const f of files) {
     if (/\.zip$/i.test(f.originalname) && isContainerZip(f.path)) {
       const inner = await expandContainerZip(f.path, path.dirname(f.path), { maxInner: MAX_UPLOAD_FILES });
@@ -610,6 +608,42 @@ async function handleUpload(req, res) {
     allFiles.push(f);
   }
 
+  return allFiles;
+}
+
+function buildFileInfos(allFiles, startIndex) {
+  return allFiles.map((f, i) => new FileInfo({
+    id: createFileId(f.originalname, startIndex + i),
+    name: f.originalname,
+    path: f.path,
+    type: /\.riv$/i.test(f.originalname) ? 'riv' : isVideoFile(f.originalname) ? 'video' : 'zip',
+    size: f.size || 0,
+    state: 'uploaded'
+  }));
+}
+
+async function handleUpload(req, res) {
+  const uploadStart = Date.now();
+  const files = req.files || [];
+  const auth = req.auth || {};
+  const log = logger.child({ module: 'handleUpload', userId: auth.userId, tenantId: auth.tenantId, clientId: auth.clientId });
+
+  if (files.length === 0) {
+    log.warn('Upload with no files', { code: 'NO_FILES' });
+    metrics.increment('upload.rejected', { reason: 'no_files' });
+    return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
+  }
+
+  let allFiles;
+  try {
+    allFiles = await validateAndExpandUpload(files, log);
+  } catch (err) {
+    if (err instanceof UploadValidationError) {
+      return res.status(400).json(errorBody(err.message, err.code));
+    }
+    throw err;
+  }
+
   if (allFiles.length > MAX_UPLOAD_FILES) {
     await Promise.all(allFiles.map(f => fs.remove(f.path).catch(() => {})));
     return res.status(400).json(errorBody(
@@ -618,14 +652,7 @@ async function handleUpload(req, res) {
     ));
   }
 
-  const fileInfos = allFiles.map((f, index) => new FileInfo({
-    id: createFileId(f.originalname, index),
-    name: f.originalname,
-    path: f.path,
-    type: /\.riv$/i.test(f.originalname) ? 'riv' : isVideoFile(f.originalname) ? 'video' : 'zip',
-    size: f.size || 0,
-    state: 'uploaded'
-  }));
+  const fileInfos = buildFileInfos(allFiles, 0);
 
   const job = new Job({
     id: req.sessionId,
@@ -649,6 +676,70 @@ async function handleUpload(req, res) {
 
   const response = job.toJSON();
   res.status(201).json(response);
+}
+
+async function handleAppendFiles(req, res) {
+  const uploadStart = Date.now();
+  const files = req.files || [];
+  const auth = req.auth || {};
+  const job = await jobStore.get(req.params.jobId);
+  const log = logger.child({ module: 'handleAppendFiles', jobId: req.params.jobId, userId: auth.userId, tenantId: auth.tenantId, clientId: auth.clientId });
+
+  if (!assertOwnership(job, auth, res)) {
+    await Promise.all(files.map(f => fs.remove(f.path).catch(() => {})));
+    return;
+  }
+
+  if (files.length === 0) {
+    log.warn('Append with no files', { code: 'NO_FILES' });
+    metrics.increment('upload.rejected', { reason: 'no_files' });
+    return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
+  }
+
+  if (job.status !== 'uploaded') {
+    await Promise.all(files.map(f => fs.remove(f.path).catch(() => {})));
+    log.warn('Append rejected — job already started', { status: job.status });
+    metrics.increment('upload.rejected', { reason: 'job_already_started' });
+    return res.status(409).json(errorBody('Cannot add files after processing has started', 'JOB_ALREADY_STARTED'));
+  }
+
+  let allFiles;
+  try {
+    allFiles = await validateAndExpandUpload(files, log);
+  } catch (err) {
+    if (err instanceof UploadValidationError) {
+      return res.status(400).json(errorBody(err.message, err.code));
+    }
+    throw err;
+  }
+
+  const combinedCount = job.files.length + allFiles.length;
+  if (combinedCount > MAX_UPLOAD_FILES) {
+    await Promise.all(allFiles.map(f => fs.remove(f.path).catch(() => {})));
+    return res.status(400).json(errorBody(
+      `Adding ${allFiles.length} file(s) would exceed the max of ${MAX_UPLOAD_FILES} files per job`,
+      'TOO_MANY_FILES'
+    ));
+  }
+
+  const newFileInfos = buildFileInfos(allFiles, job.files.length);
+  job.files.push(...newFileInfos);
+  job.total = job.files.length;
+
+  await jobStore.update(job.id, { files: job.files, total: job.total });
+
+  const uploadDuration = Date.now() - uploadStart;
+  metrics.increment('upload.complete');
+  metrics.timing('upload.duration', uploadDuration);
+  metrics.count('upload.files', allFiles.length);
+  log.info('Files appended to job', {
+    jobId: job.id,
+    addedCount: allFiles.length,
+    totalFiles: job.files.length,
+    duration: uploadDuration
+  });
+
+  res.status(200).json(job.toJSON());
 }
 
 async function handleValidatorUpload(req, res) {
@@ -1175,6 +1266,17 @@ export async function startWebServer(port = 3001, opts = {}) {
     req.sessionId = newId();
     next();
   }, upload.array('files'), handleUpload);
+
+  v1.post('/jobs/:jobId/files', rateLimiter, (req, res, next) => {
+    // jobId is attacker-controlled and multer's destination callback uses it
+    // as a filesystem directory name before ownership is checked — restrict
+    // it to the format newId() produces to rule out path traversal.
+    if (!/^[a-f0-9]{8}$/.test(req.params.jobId)) {
+      return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
+    }
+    req.sessionId = req.params.jobId;
+    next();
+  }, upload.array('files'), handleAppendFiles);
 
   v1.post('/jobs/:jobId/process', rateLimiter, handleStartProcessing);
 

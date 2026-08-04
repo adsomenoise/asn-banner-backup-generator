@@ -503,7 +503,9 @@ function handleFiles(files) {
   setProgress(0);
   progressText.textContent = 'Uploading...';
 
-  xhrUpload('/api/v1/jobs', form, pct => {
+  const uploadUrl = sessionId ? `/api/v1/jobs/${sessionId}/files` : '/api/v1/jobs';
+
+  xhrUpload(uploadUrl, form, pct => {
     setProgress(pct);
     progressText.textContent = `Uploading... ${Math.round(pct)}%`;
   })
@@ -513,8 +515,11 @@ function handleFiles(files) {
       return body;
     })
     .then(data => {
+      // The server returns the job's full, authoritative file list (not just
+      // the files from this call) — replace, don't merge, so a batch added
+      // across several drag/select actions still maps to one backend job.
       sessionId = data.jobId;
-      const mapped = data.files.map(f => ({
+      sessionFiles = data.files.map(f => ({
         id: f.fileId,
         name: f.fileName,
         type: f.fileType,
@@ -522,7 +527,6 @@ function handleFiles(files) {
         state: f.state,
         error: f.error || null
       }));
-      sessionFiles = [...sessionFiles, ...mapped];
       renderFileList();
       setProgress(0);
       progressText.textContent = readyMessage(sessionFiles.length);

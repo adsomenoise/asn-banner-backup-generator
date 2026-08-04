@@ -9,6 +9,51 @@ npm install
 npx playwright install chromium
 ```
 
+`npm install` also triggers a `postinstall` hook that runs `npx playwright install chromium` automatically — the explicit command above is only needed if that hook was skipped (e.g. `npm install --ignore-scripts`).
+
+## Running Locally
+
+**Prerequisites:** Node.js 20+ (see [Requirements](#requirements)).
+
+```bash
+git clone <repo-url>
+cd riveBackupImageGenerator
+npm install
+npm run serve
+```
+
+Open `http://localhost:3001` in your browser — the drop zone accepts `.zip`, `.riv`, or video files (see [Usage — Web Interface](#usage--web-interface) for the full workflow).
+
+No `.env` file is required for local development — nothing in the codebase loads `.env` automatically (there's no `dotenv` dependency), and every setting falls back to a sane local default: `PORT=3001`, `AUTH_MODE=development` (auto-logs you in as `dev-user`), `CORS_ORIGIN=*`, `CAPTURE_CONCURRENCY=3`. `.env.example` documents the variables relevant to a **production** deployment; copy it to `.env` and `export $(cat .env | xargs)` (or use your process manager's env-file support) only if you need to override defaults or reproduce production auth locally.
+
+Useful variations:
+
+```bash
+# Auto-restart on file changes
+npm run serve:dev
+
+# Override one setting inline, e.g. run more/fewer concurrent captures
+CAPTURE_CONCURRENCY=5 npm run serve
+
+# Save debug HTML/errors for failed captures
+RIVE_DEBUG_DIR=/tmp/rive-debug npm run serve
+
+# Prefer the CLI batch mode instead of the web UI
+npm run generate
+```
+
+Once the server is running, sanity-check it with:
+
+```bash
+curl http://localhost:3001/api/v1/health
+```
+
+To verify your local setup end-to-end without touching the UI:
+
+```bash
+npm run quality:gate   # lint + full test suite
+```
+
 ## Quality Gates
 
 ```bash
