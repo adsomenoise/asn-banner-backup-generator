@@ -191,6 +191,15 @@ ZIP input:
 
 Standalone Rive input is wrapped in generated HTML after dimensions are parsed from its filename. Video input bypasses Chromium and uses the dedicated video/ffmpeg path.
 
+Generated standalone Rive wrappers implement the explicit backup contract automatically. They handle `?backup=1`, expose `window.generateBackupFrame()` and `window.riveInstance`, pause and scrub the Rive instance, wait for two browser paint frames, and then set `window.__backupReady = true`.
+
+For uploaded ZIP creatives, the validator reports:
+
+- `HAS_BACKUP_HOOK` when it detects a ready signal plus either `?backup=1` handling or `window.generateBackupFrame()`.
+- `MISSING_BACKUP_HOOK` when the creative does not expose a complete explicit contract and would require visual-stability fallback.
+
+Normal job processing also adds an actionable per-file warning whenever capture actually uses the fallback, directing the creative author to the explicit contract.
+
 ### Capture strategies
 
 `captureBackup()` tries these strategies in order when `strategy: "auto"`:
@@ -201,6 +210,11 @@ Standalone Rive input is wrapped in generated HTML after dimensions are parsed f
 4. Sample low-resolution full-viewport screenshots every 250 ms, capture after two seconds of visual stability, or capture the final available frame at the configured hard deadline.
 
 It waits for fonts before taking a clipped PNG screenshot, then converts the screenshot to an optimized JPG. The default target is 80 KiB, using quality tiers `95, 80, 65, 50, 35` plus the caller's preferred quality.
+
+The strategy string for step 4 is currently `Fallback timeout` for both possible outcomes. This label does not mean every capture reached the deadline. The preceding `Visual stability` log records the actual outcome:
+
+- `settled`: the screenshot was triggered early after two seconds without a meaningful visual change.
+- `timeout`: the hard deadline was reached while the visual was still changing.
 
 The browser pool reuses Playwright browser processes. A global semaphore bounds concurrent file work; `CAPTURE_CONCURRENCY` defaults to 3 and is capped at 8.
 
@@ -223,7 +237,7 @@ The browser pool reuses Playwright browser processes. A global semaphore bounds 
 | Output | PNG or JPEG, per-item target | always JPG, fixed 80 KiB target | make output policy configurable and return actual target compliance |
 | Delivery | base64 in response | files in result ZIP | support both at the boundary, not in the capture core |
 | Ordering | completion order | stable per-file job identity | compatibility response must restore request order |
-| Validation | none | validator presets and missing-asset checks | keep and integrate validation into replacement workflow |
+| Validation | none | validator presets, missing-asset checks, and explicit-contract findings | keep contract guidance in the normal creative workflow |
 | Authentication | none | development or gateway-backed auth and ownership | never expose a Lachmed-compatible route without auth |
 | Rate limiting | none | per-IP mutation limiter | retain; consider a shared store when horizontally scaled |
 | ZIP safety | not applicable | bounded, traversal-safe extraction | retain |
@@ -240,6 +254,8 @@ Lachmed mostly observes an animation running in real time. It captures after an 
 This project prefers an explicit creative contract, then tries a Rive scrub, then observes the complete viewport in real time. The fallback now sees CSS, DOM, canvas, WebGL, timer-driven, and media animation without replacing the creative's animation scheduler. It captures after two seconds without a meaningful pixel change, with the configured duration retained as a hard deadline.
 
 The explicit contract remains the most deterministic option. For unmodified legacy banners, the current project's full-viewport sampler is broader than Lachmed's canvas-only sampler, but its shorter stability window should be validated against creatives containing deliberate pauses.
+
+Unlike Lachmed, the current detector does not require a minimum number of observed visual changes before it may settle. A completely static page can therefore finish after two seconds, which is useful for static creatives but can capture too early when an animation has a delayed start.
 
 ### 2. The visual-stability tradeoff is now coverage versus sampling cost
 
@@ -409,13 +425,13 @@ Without this corpus, “parity” is subjective and changes to animation handlin
 
 Use this priority order:
 
-1. **Explicit creative contract:** `?backup=1`, `generateBackupFrame()`, and a ready signal. Expand `docs/creative-backup-contract.md` into the canonical contract for all new creatives.
+1. **Explicit creative contract:** `?backup=1`, `generateBackupFrame()`, and a ready signal. This is implemented in generated Rive wrappers, documented in `docs/creative-backup-contract.md`, detected by ZIP validation, and recommended by per-file fallback warnings. Continue adoption across externally authored creatives.
 2. **Explicit runtime signals:** recognize configured Rive state names, including Lachmed's `end` and `main_animation_rollout` conventions. Preserve the creative's own callback.
 3. **Technology adapters:** video seek, Rive APIs, and CreateJS teleporting only where reliable and covered by fixtures.
-4. **Generic visual stability:** low-resolution full-viewport samples at a modest interval, requiring both observed motion and a stable window. This should cover DOM and WebGL as well as canvas.
+4. **Generic visual stability:** implemented using low-resolution full-viewport samples every 250 ms and a two-second stable window. It covers DOM and WebGL as well as canvas. It currently does not require observed motion; decide from corpus testing whether delayed-start protection is needed.
 5. **Hard timeout:** capture the final available frame and return a structured warning.
 
-Do not use synthetic rAF draining as the only generic fallback. Keep it as an optional acceleration strategy behind a feature flag until corpus results prove it safe.
+Synthetic rAF draining was removed from the generic fallback. Real-time viewport sampling now observes the creative without replacing its animation scheduler.
 
 Useful outcome values are `explicit-ready`, `rive-state`, `video-seeked`, `createjs-final-frame`, `visually-settled`, and `timeout`. Expose them in logs, metrics, and results.
 
@@ -466,7 +482,7 @@ A safer alternative is to change Bannerama to upload the creative artifact or pl
 
 Highest-value optimizations, in recommended order:
 
-1. Increase adoption of the explicit backup contract; it eliminates most wait time and ambiguity.
+1. Continue adoption of the explicit backup contract in externally authored ZIP creatives. Generated standalone Rive wrappers, validator findings, documentation, and runtime fallback warnings now support this effort.
 2. Tune the new early real visual-stability detector against the production corpus while retaining the 15-second hard deadline.
 3. Reuse healthy browsers and contexts as today, with queue wait and lease duration metrics.
 4. Tune `CAPTURE_CONCURRENCY` from measured CPU, memory, crash rate, and p95 latency—not CPU count alone.
@@ -512,13 +528,13 @@ Add the following to the existing test suite:
 9. Load tests with more items than `CAPTURE_CONCURRENCY`, large multi-file jobs, and simultaneous tenants.
 10. Shadow comparison reports showing perceptual mismatch and manual adjudication.
 
-## Suggested first implementation slice
+## Suggested next implementation slice
 
-The smallest high-value slice is:
+The next smallest high-value slice is:
 
 1. Introduce a transport-neutral `CaptureResult` containing a buffer and metadata.
 2. Parameterize JPEG/PNG and `maxBytes` while preserving the current default JPG behavior.
-3. Make the full-viewport visual-stability strategy's `stableForMs`, polling interval, and pixel threshold configurable, and evaluate whether a minimum observation period is needed.
+3. Make the implemented full-viewport visual-stability strategy's `stableForMs`, polling interval, and pixel threshold configurable, and evaluate whether a minimum observation period or minimum change count is needed.
 4. Add Rive completion for `end` and `main_animation_rollout`.
 5. Create fixtures and perceptual tests for those behaviors.
 6. Benchmark the same fixtures against Lachmed.
