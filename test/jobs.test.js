@@ -58,10 +58,24 @@ describe('FileInfo', () => {
     const f = new FileInfo({ id: 'f1', name: 'banner.zip', type: 'zip', state: 'uploaded' });
     const json = f.toJSON();
     assert.strictEqual(json.fileId, 'f1');
+    assert.strictEqual(json.inputIndex, null);
     assert.strictEqual(json.fileName, 'banner.zip');
     assert.strictEqual(json.fileType, 'zip');
     assert.strictEqual(json.state, 'uploaded');
     assert.strictEqual(json.error, null);
+  });
+
+  it('assigns and preserves deterministic input indexes', () => {
+    const job = new Job({
+      files: [
+        { id: 'f1', name: 'first.zip' },
+        { id: 'f2', name: 'second.zip', inputIndex: 7 }
+      ]
+    });
+
+    assert.strictEqual(job.files[0].inputIndex, 0);
+    assert.strictEqual(job.files[1].inputIndex, 7);
+    assert.deepStrictEqual(job.toJSON().files.map(file => file.inputIndex), [0, 7]);
   });
 
   it('toJSON includes error when set', () => {

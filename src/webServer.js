@@ -10,11 +10,12 @@ import { checkAssetPaths } from './checkAssetPaths.js';
 import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
 import { captureBackup } from './captureBackup.js';
+import { extensionForFormat } from './capture/outputEncoder.js';
 import { captureVideoFrame, isVideoFile } from './captureVideo.js';
 import { createServer as startFileServer, closeServer as stopFileServer } from './localServer.js';
 import { logger } from './logger.js';
 import { metrics } from './metrics.js';
-import { sanitizeFileName } from './utils.js';
+import { getUniqueOutputPath, sanitizeFileName } from './utils.js';
 import { parseRivDimensions, generateRiveHTML } from './riveTemplate.js';
 import { createAuthMiddleware } from './auth/middleware.js';
 import { Job, FileInfo } from './jobs/Job.js';
@@ -43,6 +44,12 @@ const APP_VERSION = '1.0.0';
 let AUTH_MODE = 'development';
 const FALLBACK_STRATEGY = 'Fallback timeout';
 const BACKUP_CONTRACT_WARNING = 'Used visual-stability fallback. Add ?backup=1 or window.generateBackupFrame() and set window.__backupReady = true when the final frame is painted for faster, deterministic capture.';
+
+async function writeCaptureResult(result, outputDir, baseName) {
+  const outputPath = getUniqueOutputPath(outputDir, baseName, extensionForFormat(result.format));
+  await fs.writeFile(outputPath, result.buffer);
+  return outputPath;
+}
 
 function parseNumberEnv(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -365,11 +372,13 @@ async function processJob(jobId) {
         fileLog.info('Processing file', { fileType: file.type });
         await jobStore.update(jobId, { files: job.files });
 
-        const captureOpts = {
-          waitTimeout: 15000,
-          strategy: 'auto',
-          debugDir: process.env.RIVE_DEBUG_DIR || null
-        };
+          const captureOpts = {
+            waitTimeout: 15000,
+            strategy: 'auto',
+            debugDir: process.env.RIVE_DEBUG_DIR || null,
+            format: 'jpeg',
+            maxBytes: 80 * 1024
+          };
 
         if (file.type === 'riv') {
           const base = path.basename(file.name, '.riv');
@@ -393,7 +402,9 @@ async function processJob(jobId) {
           const url = storage.toPublicUrl(port, htmlFile, serveDir);
 
           fileLog.info('Capturing Rive creative', { dimensions: `${dims.width}x${dims.height}` });
-          const result = await captureBackup(url, dims, job.resultDir, sanitized, captureOpts);
+          const result = await captureBackup(url, dims, { ...captureOpts, debugName: sanitized });
+          const outputPath = await writeCaptureResult(result, job.resultDir, sanitized);
+          fileLog.info('Backup image saved', { outputPath, format: result.format, byteLength: result.byteLength });
 
           if (result.strategy === FALLBACK_STRATEGY) {
             file.warnings.push(BACKUP_CONTRACT_WARNING);
@@ -404,7 +415,7 @@ async function processJob(jobId) {
           await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'riv' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
-          return { name: sanitized, type: 'riv', creativeDir };
+          return { name: sanitized, type: 'riv', creativeDir, inputIndex: file.inputIndex };
         } else if (file.type === 'video') {
           const videoName = path.basename(file.name);
           sanitized = sanitizeFileName(path.parse(videoName).name);
@@ -416,7 +427,7 @@ async function processJob(jobId) {
           await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'video' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
-          return { name: sanitized, type: 'video', creativeDir: null };
+          return { name: sanitized, type: 'video', creativeDir: null, inputIndex: file.inputIndex };
         } else {
           const zipName = path.basename(file.name, '.zip');
           sanitized = sanitizeFileName(zipName);
@@ -438,7 +449,9 @@ async function processJob(jobId) {
           const url = storage.toPublicUrl(port, entry, serveDir);
 
           fileLog.info('Capturing ZIP creative', { dimensions: `${dimensions.width}x${dimensions.height}` });
-          const result = await captureBackup(url, dimensions, job.resultDir, sanitized, captureOpts);
+          const result = await captureBackup(url, dimensions, { ...captureOpts, debugName: sanitized });
+          const outputPath = await writeCaptureResult(result, job.resultDir, sanitized);
+          fileLog.info('Backup image saved', { outputPath, format: result.format, byteLength: result.byteLength });
 
           if (result.strategy === FALLBACK_STRATEGY) {
             file.warnings.push(BACKUP_CONTRACT_WARNING);
@@ -449,7 +462,7 @@ async function processJob(jobId) {
           await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'zip' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
-          return { name: sanitized, type: 'zip', creativeDir: null };
+          return { name: sanitized, type: 'zip', creativeDir: null, inputIndex: file.inputIndex };
         }
       } catch (err) {
         const errorMsg = err.message;
@@ -470,6 +483,7 @@ async function processJob(jobId) {
 
     const results = (await Promise.all(tasks)).filter(Boolean);
     job.results.push(...results);
+    job.results.sort((left, right) => left.inputIndex - right.inputIndex);
 
     if (signal.aborted) {
       log.info('Job cancelled — skipping ZIP build');
@@ -624,6 +638,7 @@ async function validateAndExpandUpload(files, log) {
 function buildFileInfos(allFiles, startIndex) {
   return allFiles.map((f, i) => new FileInfo({
     id: createFileId(f.originalname, startIndex + i),
+    inputIndex: startIndex + i,
     name: f.originalname,
     path: f.path,
     type: /\.riv$/i.test(f.originalname) ? 'riv' : isVideoFile(f.originalname) ? 'video' : 'zip',

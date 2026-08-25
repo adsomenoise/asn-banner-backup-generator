@@ -52,4 +52,57 @@ describe('BrowserPool', () => {
     pool.release(second);
     await pool.close();
   });
+
+  it('discards a disconnected browser on release and replaces it for a waiter', async () => {
+    let launches = 0;
+    const pool = new BrowserPool({
+      max: 1,
+      launch: async () => {
+        let connected = true;
+        return {
+          id: ++launches,
+          isConnected: () => connected,
+          disconnect: () => { connected = false; },
+          close: async () => { connected = false; }
+        };
+      }
+    });
+
+    const first = await pool.acquire();
+    const pending = pool.acquire();
+    first.browser.disconnect();
+    pool.release(first);
+
+    const replacement = await pending;
+    assert.strictEqual(launches, 2);
+    assert.notStrictEqual(replacement.browser, first.browser);
+    pool.release(replacement);
+    await pool.close();
+  });
+
+  it('does not lease a browser that disconnected while idle', async () => {
+    let launches = 0;
+    const pool = new BrowserPool({
+      max: 1,
+      launch: async () => {
+        let connected = true;
+        return {
+          id: ++launches,
+          isConnected: () => connected,
+          disconnect: () => { connected = false; },
+          close: async () => { connected = false; }
+        };
+      }
+    });
+
+    const first = await pool.acquire();
+    pool.release(first);
+    first.browser.disconnect();
+    const replacement = await pool.acquire();
+
+    assert.strictEqual(launches, 2);
+    assert.notStrictEqual(replacement.browser, first.browser);
+    pool.release(replacement);
+    await pool.close();
+  });
 });

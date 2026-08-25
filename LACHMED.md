@@ -15,7 +15,7 @@ The two projects overlap at the Chromium screenshot stage, but currently solve d
 - **Lachmed is a synchronous URL-to-image microservice.** It receives public banner URLs as JSON, detects or waits for an end frame, and returns base64 PNG/JPEG data in the same HTTP response.
 - **This project is a complete upload-to-download workflow.** It accepts ZIP, Rive, and video files, validates and extracts them, serves creatives locally, processes them as asynchronous jobs, stores JPG results, and packages downloads. It also includes authentication, ownership, rate limiting, metrics, bounded concurrency, a web UI, a CLI, validation, and tests.
 
-This project is therefore the stronger foundation for a replacement. It now has full-viewport visual-stability detection; the main remaining parity gaps are Lachmed's Rive end-state convention, support for remote URL input, PNG output, caller-defined file-size limits, and a transition-compatible API.
+This project is therefore the stronger foundation for a replacement. It now has full-viewport visual-stability detection and configurable PNG/JPEG output with caller-defined size targets; the main remaining parity gaps are Lachmed's Rive end-state convention, support for remote URL input, and a transition-compatible API.
 
 The recommended direction is **not to copy Lachmed wholesale**. Extract a shared capture engine inside this project, add deterministic end-frame signals first and Lachmed-compatible stability detection as a fallback, then expose an authenticated compatibility endpoint. Run both engines against the same production corpus before switching traffic.
 
@@ -67,7 +67,8 @@ Relevant files here:
 
 - `src/webServer.js`: API, authentication, uploads, jobs, processing, cleanup, downloads, and validator endpoints.
 - `src/index.js`: sequential CLI batch workflow.
-- `src/captureBackup.js`: Playwright capture strategies and JPEG generation.
+- `src/captureBackup.js`: transport-neutral Playwright capture orchestration.
+- `src/capture/`: end-frame strategies, screenshot acquisition/debug artifacts, and configurable PNG/JPEG encoding.
 - `src/browserPool.js`: bounded, reusable Chromium pool.
 - `src/localServer.js`: serves extracted creatives over localhost HTTP.
 - `src/extractZip.js`: bounded extraction and path-traversal protection.
@@ -237,7 +238,7 @@ The browser pool reuses Playwright browser processes. A global semaphore bounds 
 | CreateJS | recursively teleports timelines | no dedicated CreateJS adapter | add only if corpus tests show it is needed |
 | Video elements in HTML | seeks to `video.duration` | pauses and seeks to the final decodable frame, then waits for paint | current project now bypasses the 15-second fallback for video creatives |
 | Standalone video files | unsupported | supported through ffmpeg | current project is broader |
-| Output | PNG or JPEG, per-item target | always JPG, fixed 80 KiB target | make output policy configurable and return actual target compliance |
+| Output | PNG or JPEG, per-item target | configurable PNG/JPEG, quality, and best-effort byte target with compliance metadata | validate exact encoding parity against Bannerama's requirements |
 | Delivery | base64 in response | files in result ZIP | support both at the boundary, not in the capture core |
 | Ordering | completion order | stable per-file job identity | compatibility response must restore request order |
 | Validation | none | validator presets, missing-asset checks, and explicit-contract findings | keep contract guidance in the normal creative workflow |
@@ -298,16 +299,15 @@ This project normally renders uploaded files through a loopback server, which is
 1. **No Lachmed-compatible endpoint.** Bannerama cannot switch URLs without changing its request flow.
 2. **No remote URL capture path.** The existing flow requires file upload.
 3. **End-frame parity is unproven.** Rive state names, CreateJS, WebGL, GSAP, CSS, and timer-driven creatives need corpus testing.
-4. **No PNG output or caller-defined size policy.** Lachmed callers may depend on both.
-5. **No parity result model.** Lachmed returns per-item warnings and base64 data.
+4. **No parity result model.** Lachmed returns per-item warnings and base64 data. The capture core now returns the required buffer and metadata, but no compatibility transport exposes Lachmed's response shape yet.
 
 ### Current technical risks
 
 1. The two-second stability window may capture during deliberate mid-animation pauses; tune it using the production corpus rather than assumptions.
 2. Full-viewport PNG sampling every 250 ms adds CPU work; measure it at production concurrency.
 3. A static or unchanged initial frame can settle after two seconds even if an animation is designed to start later. Consider a minimum observation period or creative metadata for known delayed starts.
-4. The 80 KiB output target is fixed in code. The final tier can still exceed it, but the result does not clearly report that condition.
-5. Browser processes are reused, but a crashed/disconnected browser is returned to the pool without an explicit health check or replacement policy.
+4. PNG/JPEG and byte targets are configurable and the result reports `withinSizeLimit`, but exact conversion/fallback policy still needs agreement for Lachmed compatibility.
+5. Browser processes are reused and disconnected browsers are discarded on release (and when found idle), then replaced within the configured pool capacity. Broader crash-rate metrics and process-supervision policy remain future work.
 6. Jobs and rate-limit state are process-local; result files are local. Multiple replicas or restarts can lose job visibility.
 7. A new local Express server is created per processing job. Ephemeral ports avoid most conflicts, but one shared hardened creative server would reduce lifecycle overhead.
 8. Local creative pages may initiate arbitrary outbound requests. Request interception and network policy are needed for strong isolation.
@@ -398,41 +398,47 @@ The web job flow can save `buffer`; a Lachmed facade can base64-encode it; the C
 
 ## Recommended optimization and migration plan
 
+Status legend:
+
+- ✅ **Fixed / complete** — implemented and covered by the current project.
+- 🟡 **In progress** — partially implemented or implemented but still awaiting corpus/production validation.
+- ⬜ **Not started** — no verified implementation exists yet.
+
 ### Phase 0 — Establish evidence
 
 Before changing capture behavior:
 
-1. Assemble a representative, versioned corpus of real banners: Rive state machines, CreateJS, GSAP/TweenMax, CSS/DOM animation, WebGL, HTML video, static banners, broken assets, infinite loops, delayed network assets, and each common size.
-2. Record Lachmed output, this project's output, duration, format, byte size, warnings, and failures for every creative.
-3. Define acceptance criteria, for example:
+1. ⬜ **Not started:** Assemble a representative, versioned corpus of real banners: Rive state machines, CreateJS, GSAP/TweenMax, CSS/DOM animation, WebGL, HTML video, static banners, broken assets, infinite loops, delayed network assets, and each common size.
+2. ⬜ **Not started:** Record Lachmed output, this project's output, duration, format, byte size, warnings, and failures for every creative.
+3. ⬜ **Not started:** Define acceptance criteria, for example:
    - correct intended frame for at least 99% of the production corpus;
    - no blank/transparent output;
    - dimensions always exact;
    - requested size met or an explicit warning returned;
    - no response-order mismatch;
    - bounded memory and p95 processing time.
-4. Store expected images and use perceptual comparison rather than byte equality.
+4. ⬜ **Not started:** Store expected images and use perceptual comparison rather than byte equality.
 
 Without this corpus, “parity” is subjective and changes to animation handling are risky.
 
 ### Phase 1 — Refactor without changing behavior
 
-1. Split `captureBackup.js` into capture orchestration, end-frame strategies, screenshot capture, and output encoding.
-2. Make output format and maximum bytes configurable instead of fixing JPG/80 KiB in module constants.
-3. Return the encoded buffer and metadata from the capture core; let callers decide whether to save, zip, or base64-encode it.
-4. Give every input a stable index and preserve ordering at adapter boundaries.
-5. Add explicit time budgets for navigation, strategy detection, stabilization, capture, and compression.
-6. Detect disconnected browsers on release and replace them rather than returning them to the idle pool.
+1. ✅ **Fixed:** `captureBackup.js` now contains orchestration only. End-frame behavior lives in `src/capture/endFrameStrategies.js`, screenshot acquisition/debug artifacts in `src/capture/screenshot.js`, and encoding in `src/capture/outputEncoder.js`.
+2. ✅ **Fixed:** The capture core accepts `format` (`jpeg`/`jpg`/`png`), `quality`, and `maxBytes`. The 80 KiB JPEG behavior remains the default, while callers can select PNG, change the byte target, or disable it. Results explicitly report whether the target was met.
+3. ✅ **Fixed:** The capture core returns the encoded `buffer` plus format, byte length, quality, maximum-size compliance, strategy, outcome, duration, and browser errors. The CLI and web worker now choose paths and write the buffer themselves.
+4. ✅ **Fixed:** Every file has a stable `inputIndex`; concurrent results are sorted by that index before packaging and persistence, giving future Lachmed-compatible adapters an explicit input-order invariant.
+5. ✅ **Fixed:** Navigation, load-state waiting, explicit-contract checks, video seeking, Rive settling, visual stabilization, end-frame selection, and the overall capture budget are normalized in the exported immutable `DEFAULT_CAPTURE_POLICY`. Callers can override the policy as one object; legacy `waitTimeout` remains supported.
+6. ✅ **Fixed:** The browser pool checks `browser.isConnected()` on release and before leasing idle browsers. Disconnected processes are closed, removed from the pool count, and replaced for queued work.
 
 ### Phase 2 — Improve end-frame correctness
 
 Use this priority order:
 
-1. **Explicit creative contract:** `?backup=1`, `generateBackupFrame()`, and a ready signal. This is implemented in generated Rive wrappers, documented in `docs/creative-backup-contract.md`, detected by ZIP validation, and recommended by per-file fallback warnings. Continue adoption across externally authored creatives.
-2. **Explicit runtime signals:** recognize configured Rive state names, including Lachmed's `end` and `main_animation_rollout` conventions. Preserve the creative's own callback.
-3. **Technology adapters:** video seek, Rive APIs, and CreateJS teleporting only where reliable and covered by fixtures.
-4. **Generic visual stability:** implemented using low-resolution full-viewport samples every 250 ms and a two-second stable window. It covers DOM and WebGL as well as canvas. It currently does not require observed motion; decide from corpus testing whether delayed-start protection is needed.
-5. **Hard timeout:** capture the final available frame and return a structured warning.
+1. 🟡 **In progress — explicit creative contract:** `?backup=1`, `generateBackupFrame()`, and a ready signal are implemented in generated Rive wrappers, documented in `docs/creative-backup-contract.md`, detected in inline and bundled ZIP JavaScript, and recommended by per-file fallback warnings. Adoption across externally authored creatives remains ongoing.
+2. ⬜ **Not started — explicit runtime signals:** recognize configured Rive state names, including Lachmed's `end` and `main_animation_rollout` conventions. Preserve the creative's own callback.
+3. 🟡 **In progress — technology adapters:** standalone video last-frame extraction, HTML video seeking, and exposed Rive instance scrubbing are implemented and tested. CreateJS teleporting and broader corpus coverage remain outstanding.
+4. ✅ **Fixed — generic visual stability:** low-resolution full-viewport samples run every 250 ms with a two-second stable window and a 15-second hard deadline. This covers DOM and WebGL as well as canvas without replacing the animation scheduler. Production tuning and delayed-start policy remain follow-up validation work.
+5. ✅ **Fixed — hard timeout:** the final available frame is captured at the deadline, processing surfaces a fallback warning, and the transport-neutral capture result reports `outcome: "settled"` or `outcome: "timeout"` independently of the compatibility strategy label.
 
 Synthetic rAF draining was removed from the generic fallback. Real-time viewport sampling now observes the creative without replacing its animation scheduler.
 
@@ -440,7 +446,7 @@ Useful outcome values are `explicit-ready`, `rive-state`, `video-seeked`, `creat
 
 ### Phase 3 — Add a safe compatibility facade
 
-Add a versioned endpoint such as `POST /api/v1/lachmed/render`, protected by the existing authentication and rate limiter. It may accept the Lachmed request shape, but should:
+⬜ **Not started.** Add a versioned endpoint such as `POST /api/v1/lachmed/render`, protected by the existing authentication and rate limiter. It may accept the Lachmed request shape, but should:
 
 - validate that the body is a non-empty bounded array;
 - validate dimensions, delay, format, maximum size, and URL length;
@@ -466,39 +472,39 @@ A safer alternative is to change Bannerama to upload the creative artifact or pl
 
 ### Phase 4 — Shadow and compare
 
-1. Mirror eligible Bannerama requests to the new adapter without using its result.
-2. Compare outputs perceptually and collect strategy, duration, byte size, warning, timeout, crash, and memory metrics.
-3. Review mismatches by creative technology and fix categories rather than individual banners.
-4. Canary a small percentage of real responses from the new service.
-5. Keep an immediate per-request fallback to Lachmed during the canary.
-6. Increase traffic only after error rate, image parity, and latency meet the agreed thresholds.
+1. ⬜ **Not started:** Mirror eligible Bannerama requests to the new adapter without using its result.
+2. ⬜ **Not started:** Compare outputs perceptually and collect strategy, duration, byte size, warning, timeout, crash, and memory metrics.
+3. ⬜ **Not started:** Review mismatches by creative technology and fix categories rather than individual banners.
+4. ⬜ **Not started:** Canary a small percentage of real responses from the new service.
+5. ⬜ **Not started:** Keep an immediate per-request fallback to Lachmed during the canary.
+6. ⬜ **Not started:** Increase traffic only after error rate, image parity, and latency meet the agreed thresholds.
 
 ### Phase 5 — Cut over and retire
 
-1. Freeze the Lachmed API contract and document the replacement endpoint/version.
-2. Move all Bannerama traffic to this service.
-3. Retain Lachmed as a monitored fallback for an agreed observation period.
-4. Remove fallback only after the long-tail corpus and production metrics are acceptable.
-5. Archive Lachmed's runtime configuration and final known-good image for rollback/audit purposes.
+1. ⬜ **Not started:** Freeze the Lachmed API contract and document the replacement endpoint/version.
+2. ⬜ **Not started:** Move all Bannerama traffic to this service.
+3. ⬜ **Not started:** Retain Lachmed as a monitored fallback for an agreed observation period.
+4. ⬜ **Not started:** Remove fallback only after the long-tail corpus and production metrics are acceptable.
+5. ⬜ **Not started:** Archive Lachmed's runtime configuration and final known-good image for rollback/audit purposes.
 
 ## Performance priorities
 
 Highest-value optimizations, in recommended order:
 
-1. Continue adoption of the explicit backup contract in externally authored ZIP creatives. Generated standalone Rive wrappers, validator findings, documentation, and runtime fallback warnings now support this effort.
-2. Tune the new early real visual-stability detector against the production corpus while retaining the 15-second hard deadline.
-3. Reuse healthy browsers and contexts as today, with queue wait and lease duration metrics.
-4. Tune `CAPTURE_CONCURRENCY` from measured CPU, memory, crash rate, and p95 latency—not CPU count alone.
-5. Separate capture concurrency from extraction/compression concurrency; Chromium and Sharp have different resource profiles.
-6. Avoid base64 internally. It adds roughly one-third to payload size; encode only in the compatibility response.
-7. Make browser resource loading policy explicit. Block analytics, trackers, popups, downloads, and unnecessary third-party requests while allowing required creative assets.
-8. Cache immutable, approved runtime assets such as the Rive runtime where licensing and deployment permit.
-9. Use a shared creative-serving process rather than one local server per job after confirming ownership/path isolation.
-10. Benchmark PNG-to-JPEG encoding and consider Sharp for both PNG and JPEG so output policy has one maintained implementation.
+1. 🟡 **In progress:** Continue adoption of the explicit backup contract in externally authored ZIP creatives. Generated standalone Rive wrappers, validator findings, bundled-JavaScript detection, documentation recipes, and runtime fallback warnings now support this effort.
+2. 🟡 **In progress:** Early real visual-stability detection with a 15-second hard deadline is implemented and tested; production-corpus tuning remains outstanding.
+3. 🟡 **In progress:** Browsers are pooled, contexts are isolated and closed, and disconnected processes are replaced. Queue-wait and lease-duration metrics remain outstanding.
+4. ⬜ **Not started:** Tune `CAPTURE_CONCURRENCY` from measured CPU, memory, crash rate, and p95 latency—not CPU count alone.
+5. ⬜ **Not started:** Separate capture concurrency from extraction/compression concurrency; Chromium and Sharp have different resource profiles.
+6. ✅ **Fixed:** Internal capture and job flows use buffers/files rather than base64. Base64 is reserved for a future compatibility boundary if required.
+7. ⬜ **Not started:** Make browser resource loading policy explicit. Block analytics, trackers, popups, downloads, and unnecessary third-party requests while allowing required creative assets.
+8. ⬜ **Not started:** Cache immutable, approved runtime assets such as the Rive runtime where licensing and deployment permit.
+9. ⬜ **Not started:** Use a shared creative-serving process rather than one local server per job after confirming ownership/path isolation.
+10. 🟡 **In progress:** Sharp now provides configurable PNG/JPEG encoding behind one output policy, while ffmpeg supplies standalone video frames. Comparative encoding benchmarks remain outstanding.
 
 ## Reliability and observability requirements
 
-Add metrics and structured fields for:
+🟡 **In progress.** Structured logging and in-memory metrics exist, including total capture duration, strategy, browser-error count, compression timing, and visual-stability outcome/duration. The following coverage is still partial:
 
 - queue wait, browser acquisition, navigation, stabilization, screenshot, compression, and total duration;
 - strategy attempted and strategy selected;
@@ -508,9 +514,9 @@ Add metrics and structured fields for:
 - active jobs, active captures, waiting captures, browsers total/idle, and cleanup failures;
 - parity mismatch score during shadowing.
 
-Every capture should carry a request ID, job ID, file ID, and capture-attempt ID. Do not put full remote URLs, authentication tokens, or uploaded content into production logs.
+🟡 **In progress:** Job and file IDs are present in processing logs, but request IDs and capture-attempt IDs are not consistently propagated. Production logs should continue to avoid full remote URLs, authentication tokens, and uploaded content.
 
-The health endpoint should distinguish:
+🟡 **In progress:** The health endpoint exposes process health and metrics, but it does not yet fully distinguish:
 
 - **liveness:** the Node process can answer;
 - **readiness:** storage is writable, required binaries exist, and the browser pool can launch or has a healthy browser;
@@ -520,27 +526,27 @@ The health endpoint should distinguish:
 
 Add the following to the existing test suite:
 
-1. Contract tests for the Lachmed-compatible request and response, including order preservation and partial errors.
-2. Golden/perceptual image tests for every corpus category.
-3. Fixtures for the two recognized Rive end states and user-provided `onStateChange` callbacks.
-4. CreateJS, TweenMax/GSAP, CSS animation, DOM animation, WebGL, multi-canvas, HTML video, static, infinite-loop, and delayed-start fixtures.
-5. Output tests for PNG, JPEG, conversion, exact dimensions, alpha handling, and impossible size targets.
-6. Timeout and cancellation tests that verify contexts, browser leases, files, and semaphores are always released.
-7. Browser-crash tests proving that the pool discards and replaces dead processes.
-8. SSRF tests covering IPv4/IPv6 loopback, private ranges, redirects, encoded addresses, DNS rebinding assumptions, cloud metadata, and prohibited schemes.
-9. Load tests with more items than `CAPTURE_CONCURRENCY`, large multi-file jobs, and simultaneous tenants.
-10. Shadow comparison reports showing perceptual mismatch and manual adjudication.
+1. ⬜ **Not started:** Contract tests for the Lachmed-compatible request and response, including order preservation and partial errors.
+2. ⬜ **Not started:** Golden/perceptual image tests for every corpus category.
+3. ⬜ **Not started:** Fixtures for the two recognized Rive end states and user-provided `onStateChange` callbacks.
+4. 🟡 **In progress:** DOM animation, static/delayed changes, visual settling, and HTML-video last-frame behavior have capture tests. CreateJS, TweenMax/GSAP, CSS-only, WebGL, multi-canvas, real video media, infinite-loop, and broader delayed-start fixtures remain outstanding.
+5. 🟡 **In progress:** JPEG and PNG encoding, caller-defined limits, impossible targets, and exact capture behavior have tests. Cross-format conversion policy and alpha-handling fixtures remain outstanding.
+6. 🟡 **In progress:** Context closure uses `finally`, browser-pool waiting/reuse is tested, and job cancellation exists. Failure-path resource-release coverage is not yet exhaustive.
+7. 🟡 **In progress:** Browser-pool tests prove disconnected processes are discarded on release and when discovered idle, and that queued work receives a replacement. An integration test that kills a real Chromium process mid-capture remains outstanding.
+8. ⬜ **Not started:** SSRF tests covering IPv4/IPv6 loopback, private ranges, redirects, encoded addresses, DNS rebinding assumptions, cloud metadata, and prohibited schemes.
+9. ⬜ **Not started:** Load tests with more items than `CAPTURE_CONCURRENCY`, large multi-file jobs, and simultaneous tenants.
+10. ⬜ **Not started:** Shadow comparison reports showing perceptual mismatch and manual adjudication.
 
 ## Suggested next implementation slice
 
 The next smallest high-value slice is:
 
-1. Introduce a transport-neutral `CaptureResult` containing a buffer and metadata.
-2. Parameterize JPEG/PNG and `maxBytes` while preserving the current default JPG behavior.
-3. Make the implemented full-viewport visual-stability strategy's `stableForMs`, polling interval, and pixel threshold configurable, and evaluate whether a minimum observation period or minimum change count is needed.
-4. Add Rive completion for `end` and `main_animation_rollout`.
-5. Create fixtures and perceptual tests for those behaviors.
-6. Benchmark the same fixtures against Lachmed.
+1. ✅ **Fixed:** A transport-neutral capture result contains the encoded buffer and metadata; persistence is handled by callers.
+2. ✅ **Fixed:** JPEG/PNG and `maxBytes` are parameterized while preserving JPEG and 80 KiB as defaults.
+3. 🟡 **In progress:** Full-viewport visual stability is implemented; make `stableForMs`, polling interval, and pixel threshold configurable and evaluate a minimum observation period or minimum change count.
+4. ⬜ **Not started:** Add Rive completion for `end` and `main_animation_rollout`.
+5. 🟡 **In progress:** Visual-stability and HTML-video fixtures exist; add Rive-state fixtures and broader perceptual tests.
+6. ⬜ **Not started:** Benchmark the same fixtures against Lachmed.
 
 Only after that slice is reliable should the project expose remote URL rendering or a compatibility route. That ordering improves the existing upload workflow immediately and avoids publishing a second API before its capture semantics are trustworthy.
 
@@ -548,18 +554,18 @@ Only after that slice is reliable should the project expose remote URL rendering
 
 Lachmed can be retired when all of these are true:
 
-- [ ] Bannerama's required request/response contract is implemented or Bannerama has migrated to the job API.
-- [ ] Remote input, if retained, has reviewed SSRF and egress controls.
-- [ ] PNG/JPEG and size-limit behavior match documented caller requirements.
-- [ ] Results preserve input identity and order.
-- [ ] The representative creative corpus meets the agreed visual correctness threshold.
-- [ ] Rive, CreateJS, GSAP, CSS/DOM, WebGL, canvas, and video cases have explicit coverage.
-- [ ] Timeouts and page errors yield one result per input and never leak browser resources.
-- [ ] Concurrency, memory, throughput, and p95/p99 latency meet production targets.
-- [ ] Jobs and artifacts behave correctly across the intended replica/restart model.
-- [ ] Metrics, alerts, dashboards, and rollback procedures are in place.
-- [ ] A canary and observation period complete without material regression.
-- [ ] Lachmed fallback and archival plans are documented and tested.
+- ⬜ **Not started:** Bannerama's required request/response contract is implemented or Bannerama has migrated to the job API.
+- ⬜ **Not started:** Remote input, if retained, has reviewed SSRF and egress controls.
+- ✅ **Fixed:** PNG/JPEG output, caller-defined best-effort size limits, and explicit `withinSizeLimit` metadata are implemented. Exact parity with future Bannerama requirements still belongs to compatibility acceptance testing.
+- ✅ **Fixed:** Normal jobs preserve stable file identity and assigned input indexes; concurrent results are restored to input order before packaging and persistence. A future compatibility endpoint can consume this invariant directly.
+- ⬜ **Not started:** The representative creative corpus meets the agreed visual correctness threshold.
+- 🟡 **In progress:** DOM/canvas visual stability, explicit hooks, Rive scrub wrappers, standalone video, and HTML video have coverage; Rive states, CreateJS, GSAP, CSS-only, WebGL, and multi-canvas coverage remain incomplete.
+- 🟡 **In progress:** Context cleanup and several failure paths are covered, but one-result-per-input compatibility behavior and exhaustive leak tests are not complete.
+- ⬜ **Not started:** Concurrency, memory, throughput, and p95/p99 latency meet production targets.
+- 🟡 **In progress:** Jobs and artifacts have local TTL cleanup; restart recovery and multi-replica persistence are not implemented.
+- 🟡 **In progress:** Structured logs and in-memory metrics exist; production alerts, dashboards, detailed capture-stage metrics, and rollback procedures remain incomplete.
+- ⬜ **Not started:** A canary and observation period complete without material regression.
+- ⬜ **Not started:** Lachmed fallback and archival plans are documented and tested.
 
 ## Decision guidance
 

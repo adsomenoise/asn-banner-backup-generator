@@ -1,466 +1,133 @@
-import sharp from 'sharp';
-import fs from 'fs-extra';
-import path from 'path';
 import { logger } from './logger.js';
 import { metrics } from './metrics.js';
-import { delay, getUniqueOutputPath } from './utils.js';
 import { getBrowserPool } from './browserPool.js';
+import { resolveEndFrame } from './capture/endFrameStrategies.js';
+import { captureScreenshot, saveDebugArtifacts } from './capture/screenshot.js';
+import { encodeScreenshot } from './capture/outputEncoder.js';
+import { remainingBudget, resolveCapturePolicy } from './capture/policy.js';
 
-const STRATEGIES = {
-  QUERY_PARAM: 'Query parameter (?backup=1)',
-  GENERATE_BACKUP_FRAME: 'window.generateBackupFrame()',
-  RIVE_INSTANCE_SCRUB: 'Rive instance scrub',
-  HTML_VIDEO_LAST_FRAME: 'HTML video last frame',
-  FALLBACK_TIMEOUT: 'Fallback timeout'
-};
-
-const VISUAL_SAMPLE_SIZE = 32;
-const VISUAL_POLL_INTERVAL_MS = 250;
-const VISUAL_STABLE_FOR_MS = 2000;
-const VISUAL_PIXEL_DELTA_THRESHOLD = 1;
-
-export async function captureBackup(baseUrl, dimensions, outputDir, baseName, options = {}) {
+export async function captureBackup(baseUrl, dimensions, options = {}) {
   const {
-    waitTimeout = 15000,
+    waitTimeout,
     quality = 90,
+    format = 'jpeg',
+    maxBytes,
     strategy = 'auto',
-    debugDir = null
+    debugDir = null,
+    debugName = 'capture',
+    policy: policyOverrides = {}
   } = options;
+
+  const policy = resolveCapturePolicy({
+    ...policyOverrides,
+    ...(waitTimeout === undefined ? {} : { endFrameTimeoutMs: waitTimeout })
+  });
 
   const log = logger.child({ module: 'captureBackup' });
   const startTime = Date.now();
+  const captureDeadlineAt = startTime + policy.overallTimeoutMs;
   const browserErrors = [];
-  let usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
-
   const pool = getBrowserPool();
   const lease = await pool.acquire();
   const { browser } = lease;
-
   const context = await browser.newContext({
     viewport: { width: dimensions.width, height: dimensions.height },
     deviceScaleFactor: 1
   });
-
   const page = await context.newPage();
 
-  // Capture browser console errors
-  page.on('console', msg => {
-    if (msg.type() === 'error' || msg.type() === 'warning') {
+  page.on('console', message => {
+    if (message.type() === 'error' || message.type() === 'warning') {
       browserErrors.push({
-        type: msg.type(),
-        text: msg.text().slice(0, 500),
-        location: msg.location()
+        type: message.type(),
+        text: message.text().slice(0, 500),
+        location: message.location()
       });
     }
   });
 
-  // Capture unhandled JS errors
-  page.on('pageerror', err => {
+  page.on('pageerror', error => {
     browserErrors.push({
       type: 'pageerror',
-      text: err.message.slice(0, 500),
-      stack: err.stack ? err.stack.split('\n').slice(0, 5).join('\n').slice(0, 1000) : null
+      text: error.message.slice(0, 500),
+      stack: error.stack ? error.stack.split('\n').slice(0, 5).join('\n').slice(0, 1000) : null
     });
   });
 
   try {
-    let backupReady = false;
     let url = baseUrl;
     let creativeTimelineStart = Date.now();
-
     if (strategy === 'auto' || strategy === 'query') {
       url = baseUrl.includes('?') ? `${baseUrl}&backup=1` : `${baseUrl}?backup=1`;
     }
 
-    page.setDefaultTimeout(15000);
+    page.setDefaultTimeout(policy.overallTimeoutMs);
     try {
       creativeTimelineStart = Date.now();
-      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
-      if (response && !response.ok()) {
-        throw new Error(`HTTP ${response.status()} ${response.statusText()}`);
-      }
+      const response = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: remainingBudget(captureDeadlineAt, policy.navigationTimeoutMs)
+      });
+      if (response && !response.ok()) throw new Error(`HTTP ${response.status()} ${response.statusText()}`);
     } catch (error) {
-      log.error('Failed to load creative', { url: baseUrl, error: error.message, dimensions: `${dimensions.width}x${dimensions.height}` });
+      log.error('Failed to load creative', {
+        url: baseUrl,
+        error: error.message,
+        dimensions: `${dimensions.width}x${dimensions.height}`
+      });
       metrics.increment('capture.load_error');
       throw new Error(`Failed to load creative URL ${url}: ${error.message}`);
     }
-    await page.waitForLoadState('load', { timeout: 1000 }).catch(() => {});
+    await page.waitForLoadState('load', {
+      timeout: remainingBudget(captureDeadlineAt, policy.loadStateTimeoutMs)
+    }).catch(() => {});
 
-    const videoResult = await trySeekHtmlVideosToEnd(page);
-    if (videoResult.found > 0 && videoResult.seeked === videoResult.found) {
-      backupReady = true;
-      usedStrategy = STRATEGIES.HTML_VIDEO_LAST_FRAME;
-      log.step(`Moved ${videoResult.seeked} HTML video element(s) to their final decodable frame`);
+    const endFrame = await resolveEndFrame(page, {
+      strategy,
+      creativeTimelineStart,
+      captureDeadlineAt,
+      policy,
+      log
+    });
+    if (endFrame.stability) {
+      metrics.increment('capture.visual_stability', { outcome: endFrame.stability.outcome });
+      metrics.timing('capture.visual_stability_duration', endFrame.stability.duration);
     }
 
-    if (!backupReady && (strategy === 'auto' || strategy === 'query')) {
-      backupReady = await checkBackupReady(page);
-      if (backupReady) {
-        usedStrategy = STRATEGIES.QUERY_PARAM;
-      }
-    }
-
-    if (!backupReady && (strategy === 'auto' || strategy === 'generate')) {
-      backupReady = await tryGenerateBackupFrame(page);
-      if (backupReady) {
-        usedStrategy = STRATEGIES.GENERATE_BACKUP_FRAME;
-      }
-    }
-
-    if (!backupReady && (strategy === 'auto' || strategy === 'scrub')) {
-      backupReady = await tryRiveInstanceScrub(page);
-      if (backupReady) {
-        usedStrategy = STRATEGIES.RIVE_INSTANCE_SCRUB;
-      }
-    }
-
-    if (!backupReady) {
-      const hasCanvas = await page.evaluate(() => !!document.querySelector('canvas'));
-
-      if (hasCanvas) {
-        log.step('Waiting for content to load...');
-        await page.evaluate(() => new Promise(r => {
-          let n = 0;
-          (function poll() {
-            const c = document.querySelector('canvas');
-            if (c) {
-              try {
-                const ctx = c.getContext('2d');
-                if (ctx) {
-                  const d = ctx.getImageData(0, 0, c.width, c.height).data;
-                  for (let i = 3; i < d.length; i += 4) {
-                    if (d[i] > 0) { r(true); return; }
-                  }
-                }
-              } catch (e) {}
-            }
-            if (++n > 15) { r(false); return; }
-            setTimeout(poll, 200);
-          })();
-        }));
-      }
-
-      const deadlineAt = creativeTimelineStart + waitTimeout;
-      log.step(`Watching for visual stability (hard deadline ${waitTimeout}ms)...`);
-      const stability = await waitForVisualStability(page, {
-        deadlineAt,
-        stableForMs: Math.min(VISUAL_STABLE_FOR_MS, waitTimeout),
-        pollIntervalMs: VISUAL_POLL_INTERVAL_MS
-      });
-
-      log.step(`Visual stability: ${stability.outcome}, samples: ${stability.samples}, changes: ${stability.changes}`);
-      metrics.increment('capture.visual_stability', { outcome: stability.outcome });
-      metrics.timing('capture.visual_stability_duration', stability.duration);
-      usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
-    }
-
-    log.stepSuccess(`Backup strategy: ${usedStrategy}`);
-    metrics.increment('capture.strategy', { strategy: usedStrategy });
-    await ensureFontsLoaded(page);
-
+    log.stepSuccess(`Backup strategy: ${endFrame.strategy}`);
+    metrics.increment('capture.strategy', { strategy: endFrame.strategy });
     const screenshotBuffer = await captureScreenshot(page, dimensions);
-    const outputPath = getUniqueOutputPath(outputDir, baseName, '.jpg');
-    await processAndSaveImage(screenshotBuffer, outputPath, quality);
-
+    const encoded = await encodeScreenshot(screenshotBuffer, { format, maxBytes, quality });
     log.stepSuccess('Screenshot captured');
-    log.saved(outputPath);
 
-    const totalDuration = Date.now() - startTime;
-    metrics.timing('capture.duration', totalDuration, { strategy: usedStrategy });
-
+    const duration = Date.now() - startTime;
+    metrics.timing('capture.duration', duration, { strategy: endFrame.strategy });
     log.info('Capture complete', {
-      duration: totalDuration,
-      strategy: usedStrategy,
+      duration,
+      strategy: endFrame.strategy,
+      outcome: endFrame.outcome,
       dimensions: `${dimensions.width}x${dimensions.height}`,
-      browserErrors: browserErrors.length
+      browserErrors: browserErrors.length,
+      format: encoded.format,
+      byteLength: encoded.byteLength,
+      withinSizeLimit: encoded.withinSizeLimit
     });
 
     if (browserErrors.length > 0) {
       log.warn('Browser errors during capture', { browserErrors: browserErrors.length });
-      // Save debug artifacts if configured
-      if (debugDir) {
-        await saveDebugArtifacts(page, debugDir, baseName, browserErrors);
-      }
+      if (debugDir) await saveDebugArtifacts(page, debugDir, debugName, browserErrors);
     }
 
     return {
-      path: outputPath,
-      strategy: usedStrategy,
-      duration: totalDuration,
+      ...encoded,
+      strategy: endFrame.strategy,
+      outcome: endFrame.outcome,
+      duration,
+      policy,
       browserErrors
     };
-
   } finally {
     await context.close();
     pool.release(lease);
   }
-}
-
-export function visualSamplesDiffer(previous, current, threshold = VISUAL_PIXEL_DELTA_THRESHOLD) {
-  if (!previous || !current || previous.length !== current.length) return true;
-
-  let totalDelta = 0;
-  for (let i = 0; i < previous.length; i++) {
-    totalDelta += Math.abs(previous[i] - current[i]);
-  }
-
-  return totalDelta / previous.length > threshold;
-}
-
-async function sampleViewport(page) {
-  const screenshot = await page.screenshot({ type: 'png' });
-  return sharp(screenshot)
-    .resize(VISUAL_SAMPLE_SIZE, VISUAL_SAMPLE_SIZE, { fit: 'fill' })
-    .removeAlpha()
-    .raw()
-    .toBuffer();
-}
-
-export async function waitForVisualStability(page, options = {}) {
-  const {
-    deadlineAt = Date.now() + 15000,
-    stableForMs = VISUAL_STABLE_FOR_MS,
-    pollIntervalMs = VISUAL_POLL_INTERVAL_MS,
-    pixelDeltaThreshold = VISUAL_PIXEL_DELTA_THRESHOLD
-  } = options;
-
-  const startedAt = Date.now();
-  let previous = null;
-  let lastChangeAt = startedAt;
-  let samples = 0;
-  let changes = 0;
-
-  while (Date.now() < deadlineAt) {
-    const current = await sampleViewport(page);
-    const sampledAt = Date.now();
-    samples++;
-
-    if (previous && visualSamplesDiffer(previous, current, pixelDeltaThreshold)) {
-      changes++;
-      lastChangeAt = sampledAt;
-    }
-    previous = current;
-
-    if (sampledAt - lastChangeAt >= stableForMs) {
-      return { outcome: 'settled', samples, changes, duration: sampledAt - startedAt };
-    }
-
-    const remaining = deadlineAt - Date.now();
-    if (remaining <= 0) break;
-    await delay(Math.min(pollIntervalMs, remaining));
-  }
-
-  return { outcome: 'timeout', samples, changes, duration: Date.now() - startedAt };
-}
-
-async function checkBackupReady(page) {
-  try {
-    return await page.waitForFunction(
-      () => window.__backupReady === true || window.__BACKUP_READY__ === true,
-      null,
-      { timeout: 1000 }
-    ).then(() => true);
-  } catch {
-    return false;
-  }
-}
-
-async function trySeekHtmlVideosToEnd(page, timeoutMs = 5000) {
-  try {
-    return await page.evaluate(async (seekTimeoutMs) => {
-      const videos = Array.from(document.querySelectorAll('video'));
-
-      async function waitForMetadata(video) {
-        if (video.readyState > 0 && Number.isFinite(video.duration)) return true;
-        return new Promise(resolve => {
-          const finish = value => {
-            clearTimeout(timer);
-            video.removeEventListener('loadedmetadata', onMetadata);
-            video.removeEventListener('error', onError);
-            resolve(value);
-          };
-          const onMetadata = () => finish(Number.isFinite(video.duration));
-          const onError = () => finish(false);
-          const timer = setTimeout(() => finish(false), seekTimeoutMs);
-          video.addEventListener('loadedmetadata', onMetadata, { once: true });
-          video.addEventListener('error', onError, { once: true });
-          video.load?.();
-        });
-      }
-
-      async function seekVideo(video) {
-        if (!(await waitForMetadata(video)) || video.duration <= 0) return false;
-
-        video.pause();
-        const endTime = Math.max(0, video.duration - Math.min(0.04, video.duration / 2));
-        return new Promise(resolve => {
-          const finish = value => {
-            clearTimeout(timer);
-            video.removeEventListener('seeked', onSeeked);
-            video.removeEventListener('error', onError);
-            resolve(value);
-          };
-          const onSeeked = () => finish(true);
-          const onError = () => finish(false);
-          const timer = setTimeout(() => finish(false), seekTimeoutMs);
-          video.addEventListener('seeked', onSeeked, { once: true });
-          video.addEventListener('error', onError, { once: true });
-          try {
-            video.currentTime = endTime;
-          } catch {
-            finish(false);
-          }
-        });
-      }
-
-      const outcomes = await Promise.all(videos.map(seekVideo));
-      if (outcomes.some(Boolean)) {
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      }
-
-      return { found: videos.length, seeked: outcomes.filter(Boolean).length };
-    }, timeoutMs);
-  } catch {
-    return { found: 0, seeked: 0 };
-  }
-}
-
-async function tryGenerateBackupFrame(page) {
-  try {
-    const hasFunction = await page.evaluate(() => typeof window.generateBackupFrame === 'function');
-    if (!hasFunction) return false;
-
-    await page.evaluate(async () => {
-      const result = window.generateBackupFrame();
-      if (result && typeof result.then === 'function') {
-        await result;
-      }
-      if (result === true) {
-        window.__backupReady = true;
-      }
-    });
-
-    return await checkBackupReady(page);
-  } catch {
-    return false;
-  }
-}
-
-async function tryRiveInstanceScrub(page) {
-  try {
-    const hasRiveInstance = await page.evaluate(() =>
-      window.riveInstance && typeof window.riveInstance.scrub === 'function'
-    );
-    if (!hasRiveInstance) return false;
-
-    await page.evaluate(() => {
-      try {
-        const instance = window.riveInstance;
-        if (instance.pause) instance.pause();
-        if (instance.scrub) instance.scrub(Number.MAX_SAFE_INTEGER);
-        if (instance.play) instance.play();
-        window.__backupReady = true;
-        window.__BACKUP_READY__ = true;
-      } catch (e) {
-        console.warn('Rive scrub failed:', e);
-      }
-    });
-
-    await delay(1500);
-    return await checkBackupReady(page);
-  } catch {
-    return false;
-  }
-}
-
-async function ensureFontsLoaded(page) {
-  try {
-    await page.evaluate(() => document.fonts.ready);
-  } catch {
-    logger.warn('Font loading check failed, continuing');
-  }
-}
-
-async function captureScreenshot(page, dimensions) {
-  return await page.screenshot({
-    type: 'png',
-    clip: {
-      x: 0,
-      y: 0,
-      width: dimensions.width,
-      height: dimensions.height
-    }
-  });
-}
-
-async function saveDebugArtifacts(page, debugDir, baseName, browserErrors) {
-  try {
-    await fs.ensureDir(debugDir);
-    const base = path.join(debugDir, baseName);
-
-    // Save error metadata
-    await fs.writeFile(
-      `${base}_errors.json`,
-      JSON.stringify(browserErrors, null, 2)
-    );
-
-    // Save page HTML (trimmed to first 50KB)
-    try {
-      const html = await page.content();
-      await fs.writeFile(`${base}_page.html`, html.slice(0, 50_000));
-    } catch (e) {
-      logger.debug('Could not save page HTML for debug', { error: e.message });
-    }
-  } catch (e) {
-    logger.debug('Failed to save debug artifacts', { error: e.message });
-  }
-}
-
-const MAX_FILE_SIZE = 80 * 1024;
-const DEFAULT_QUALITY_TIERS = [95, 80, 65, 50, 35];
-
-function jpegOptions(quality) {
-  return {
-    quality,
-    mozjpeg: true,
-    chromaSubsampling: '4:2:0',
-    trellisQuantisation: true,
-    overshootDeringing: true,
-    optimiseScan: true
-  };
-}
-
-export async function processAndSaveImage(buffer, outputPath, preferredQuality) {
-  let result = null;
-  const seen = new Set();
-  const tiers = [];
-  const log = logger.child({ module: 'captureBackup' });
-
-  if (preferredQuality && preferredQuality >= 10 && preferredQuality <= 100) {
-    tiers.push(preferredQuality);
-    seen.add(preferredQuality);
-  }
-  for (const q of DEFAULT_QUALITY_TIERS) {
-    if (!seen.has(q)) tiers.push(q);
-  }
-
-  const startTime = Date.now();
-
-  for (const q of tiers) {
-    result = await sharp(buffer).jpeg(jpegOptions(q)).toBuffer();
-    log.debug('Compression tier', { quality: q, size: result.length });
-    if (result.length <= MAX_FILE_SIZE) {
-      log.debug('Selected quality tier', { quality: q, size: result.length });
-      metrics.increment('compression.tier_selected', { quality: String(q) });
-      break;
-    }
-  }
-
-  const compressionTime = Date.now() - startTime;
-  metrics.timing('compression.duration', compressionTime);
-
-  await sharp(result).toFile(outputPath);
-
-  metrics.increment('compression.complete');
-  metrics.count('compression.bytes', result.length);
 }

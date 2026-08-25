@@ -148,6 +148,8 @@ node src/index.js \
   --output ./output \
   --wait 15000 \
   --quality 95 \
+  --format jpeg \
+  --max-bytes 81920 \
   --port 3000 \
   --strategy auto
 ```
@@ -157,7 +159,9 @@ node src/index.js \
 | `--input, -i` | `./input` | Input folder with ZIP files |
 | `--output, -o` | `./output` | Output folder for JPGs |
 | `--wait, -w` | `15000` | Creative duration in ms before fallback screenshot capture |
-| `--quality, -q` | `95` | Preferred JPEG quality (10–100); falls back through lower tiers to stay under 80 KB |
+| `--quality, -q` | `90` | Preferred encoding quality (1–100); falls back through format-specific tiers to meet the byte target |
+| `--format, -f` | `jpeg` | Output format: `jpeg`, `jpg`, or `png` |
+| `--max-bytes` | `81920` | Best-effort maximum encoded image size in bytes |
 | `--port, -p` | `3000` | Local server port |
 | `--strategy, -s` | `auto` | Backup strategy: `auto`, `query`, `generate`, `scrub` |
 
@@ -857,7 +861,11 @@ Set `ADMIN_PASSWORD` in production. `ADMIN_USERNAME` defaults to `admin` when un
 
 ### Quality Settings
 
-The `--quality` flag sets the *preferred* JPEG quality. The encoder tries the requested quality first, then falls back through `[95, 80, 65, 50, 35]` until the output fits in 80 KB. This ensures small output files even if the preferred quality would exceed the limit.
+The capture core accepts `format`, `quality`, and `maxBytes`. JPEG encoding tries the requested quality first, then falls back through `[95, 80, 65, 50, 35]`. PNG encoding uses palette quality tiers `[100, 80, 60, 40, 20]`. The default target remains 80 KiB, but callers can choose another positive byte limit or disable the limit internally with `null`/`false`.
+
+Encoding is best-effort. The returned capture result includes `byteLength`, `maxBytes`, and `withinSizeLimit`, so callers can warn or reject when even the lowest configured tier cannot meet the target.
+
+`captureBackup()` is transport-neutral and does not write files. It returns `{ buffer, format, byteLength, quality, maxBytes, withinSizeLimit, strategy, outcome, duration, browserErrors }`. The CLI and web job worker select a path and write `buffer`; a future compatibility API may base64-encode the same buffer without changing capture logic.
 
 ### Error Handling
 
@@ -1087,7 +1095,11 @@ rive-backup-generator/
 │   │   └── LocalStorage.js # Job-scoped filesystem storage
 │   ├── index.js        # CLI entry point
 │   ├── webServer.js    # Express web server
-│   ├── captureBackup.js# Playwright screenshot + Sharp compression
+│   ├── captureBackup.js# Capture orchestration; returns a transport-neutral result
+│   ├── capture/
+│   │   ├── endFrameStrategies.js # Explicit hooks, video, Rive, and visual stability
+│   │   ├── screenshot.js         # Font readiness, screenshot, and debug artifacts
+│   │   └── outputEncoder.js      # Configurable PNG/JPEG encoding and size policy
 │   ├── browserPool.js  # Reusable Playwright Chromium pool
 │   ├── config.js       # Runtime config parsing (capture concurrency)
 │   ├── extractZip.js   # Safe ZIP extraction

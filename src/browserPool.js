@@ -16,9 +16,11 @@ export class BrowserPool {
       throw new Error('Browser pool is closed');
     }
 
-    const browser = this.idle.pop();
-    if (browser) {
-      return { browser };
+    while (this.idle.length > 0) {
+      const browser = this.idle.pop();
+      if (isBrowserConnected(browser)) return { browser };
+      this.total--;
+      browser.close().catch(() => {});
     }
 
     if (this.total < this.max) {
@@ -40,7 +42,7 @@ export class BrowserPool {
   release(lease) {
     if (!lease?.browser) return;
 
-    if (this.closed) {
+    if (this.closed || !isBrowserConnected(lease.browser)) {
       this.total--;
       lease.browser.close().catch(() => {});
       this.#drainWaiters();
@@ -80,6 +82,10 @@ export class BrowserPool {
         this.#drainWaiters();
       });
   }
+}
+
+function isBrowserConnected(browser) {
+  return typeof browser?.isConnected !== 'function' || browser.isConnected();
 }
 
 async function launchChromium() {

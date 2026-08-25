@@ -49,7 +49,8 @@ function prettyOutput(level, message, meta = {}) {
   const metaKeys = ['module', 'jobId', 'fileId', 'userId', 'tenantId', 'clientId',
     'duration', 'error', 'code', 'strategy', 'fileCount', 'entryCount',
     'dimensions', 'quality', 'totalBytes', 'retryAttempt', 'status', 'files',
-    'reason', 'browserErrors'];
+    'reason', 'browserErrors', 'outcome', 'format', 'byteLength', 'maxBytes',
+    'withinSizeLimit'];
   const metaParts = [];
   for (const k of metaKeys) {
     const v = meta[k];

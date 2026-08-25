@@ -7,7 +7,8 @@ import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
 import { createServer, closeServer, getServerUrl, getPort } from './localServer.js';
 import { captureBackup } from './captureBackup.js';
-import { sanitizeFileName } from './utils.js';
+import { extensionForFormat } from './capture/outputEncoder.js';
+import { getUniqueOutputPath, sanitizeFileName } from './utils.js';
 
 const DEFAULT_OPTIONS = {
   input: './input',
@@ -16,12 +17,14 @@ const DEFAULT_OPTIONS = {
   port: 3000,
   wait: 15000,
   quality: 90,
+  format: 'jpeg',
+  'max-bytes': 80 * 1024,
   strategy: 'auto'
 };
 
 async function main() {
   const argv = minimist(process.argv.slice(2), {
-    string: ['input', 'output', 'temp', 'port', 'wait', 'quality', 'strategy'],
+    string: ['input', 'output', 'temp', 'port', 'wait', 'quality', 'format', 'max-bytes', 'strategy'],
     default: DEFAULT_OPTIONS,
     alias: {
       i: 'input',
@@ -30,6 +33,7 @@ async function main() {
       p: 'port',
       w: 'wait',
       q: 'quality',
+      f: 'format',
       s: 'strategy'
     }
   });
@@ -41,6 +45,8 @@ async function main() {
     port: parseInt(argv.port, 10),
     waitTimeout: parseInt(argv.wait, 10),
     quality: parseInt(argv.quality, 10),
+    format: argv.format,
+    maxBytes: parseInt(argv['max-bytes'], 10),
     strategy: argv.strategy
   };
   
@@ -85,11 +91,21 @@ async function main() {
       
       logger.step(`Opening: ${bannerUrl}`);
       
-      const result = await captureBackup(bannerUrl, dimensions, options.outputDir, sanitizedName, {
+      const result = await captureBackup(bannerUrl, dimensions, {
         waitTimeout: options.waitTimeout,
         quality: options.quality,
+        format: options.format,
+        maxBytes: options.maxBytes,
         strategy: options.strategy
       });
+
+      const outputPath = getUniqueOutputPath(
+        options.outputDir,
+        sanitizedName,
+        extensionForFormat(result.format)
+      );
+      await fs.writeFile(outputPath, result.buffer);
+      logger.saved(outputPath);
       
       logger.stepSuccess(`Backup strategy used: ${result.strategy}`);
       
@@ -130,6 +146,8 @@ function logConfiguration(options) {
   logger.info(`  Port:     ${options.port}`);
   logger.info(`  Wait:     ${options.waitTimeout}ms`);
   logger.info(`  Quality:  ${options.quality}`);
+  logger.info(`  Format:   ${options.format}`);
+  logger.info(`  Max size: ${options.maxBytes} bytes`);
   logger.info(`  Strategy: ${options.strategy}\n`);
 }
 

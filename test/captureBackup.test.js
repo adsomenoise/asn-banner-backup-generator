@@ -4,7 +4,9 @@ import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs-extra';
 import http from 'node:http';
-import { captureBackup, processAndSaveImage, visualSamplesDiffer } from '../src/captureBackup.js';
+import { captureBackup } from '../src/captureBackup.js';
+import { encodeScreenshot } from '../src/capture/outputEncoder.js';
+import { visualSamplesDiffer } from '../src/capture/endFrameStrategies.js';
 import { closeBrowserPool } from '../src/browserPool.js';
 
 const MAX_FILE_SIZE = 80 * 1024;
@@ -24,39 +26,43 @@ function createTestImage(width, height) {
   }).png().toBuffer();
 }
 
-describe('captureBackup — processAndSaveImage (quality tiers)', () => {
+describe('encodeScreenshot — configurable output', () => {
   it('produces a JPEG under MAX_FILE_SIZE', async () => {
     const img = await createTestImage(300, 250);
-    const out = path.join('test-temp-capute', 'test.jpg');
-    await fs.ensureDir(path.dirname(out));
-    await processAndSaveImage(img, out);
-    const stat = await fs.stat(out);
-    assert.ok(stat.size <= MAX_FILE_SIZE, `JPEG size ${stat.size} > ${MAX_FILE_SIZE}`);
-    await fs.remove(out);
+    const result = await encodeScreenshot(img);
+    assert.strictEqual(result.format, 'jpeg');
+    assert.ok(result.byteLength <= MAX_FILE_SIZE, `JPEG size ${result.byteLength} > ${MAX_FILE_SIZE}`);
+    assert.strictEqual(result.withinSizeLimit, true);
   });
 
   it('uses preferredQuality as the highest priority tier', async () => {
     const img = await createTestImage(300, 250);
-    const out95 = path.join('test-temp-capute', 'q95.jpg');
-    const out50 = path.join('test-temp-capute', 'q50.jpg');
-    await fs.ensureDir(path.dirname(out95));
-    await processAndSaveImage(img, out95, 95);
-    await processAndSaveImage(img, out50, 50);
-    const s95 = (await fs.stat(out95)).size;
-    const s50 = (await fs.stat(out50)).size;
-    assert.ok(s95 >= s50, `q95 image (${s95}) should be >= q50 (${s50})`);
-    await fs.remove(out95);
-    await fs.remove(out50);
+    const q95 = await encodeScreenshot(img, { quality: 95, maxBytes: null });
+    const q50 = await encodeScreenshot(img, { quality: 50, maxBytes: null });
+    assert.ok(q95.byteLength >= q50.byteLength, `q95 image (${q95.byteLength}) should be >= q50 (${q50.byteLength})`);
   });
 
   it('handles a large image without crashing', async () => {
     const img = await createTestImage(728, 90);
-    const out = path.join('test-temp-capute', 'large.jpg');
-    await fs.ensureDir(path.dirname(out));
-    await processAndSaveImage(img, out);
-    const stat = await fs.stat(out);
-    assert.ok(stat.size > 0);
-    await fs.remove(out);
+    const result = await encodeScreenshot(img);
+    assert.ok(result.byteLength > 0);
+  });
+
+  it('supports PNG and caller-defined maximum bytes', async () => {
+    const img = await createTestImage(300, 250);
+    const result = await encodeScreenshot(img, { format: 'png', maxBytes: 200 * 1024, quality: 80 });
+    assert.strictEqual(result.format, 'png');
+    assert.ok(result.buffer.subarray(1, 4).equals(Buffer.from('PNG')));
+    assert.strictEqual(result.maxBytes, 200 * 1024);
+    assert.strictEqual(result.withinSizeLimit, true);
+  });
+
+  it('reports when an output cannot meet the caller-defined maximum', async () => {
+    const img = await createTestImage(300, 250);
+    const result = await encodeScreenshot(img, { format: 'jpeg', maxBytes: 1 });
+    assert.strictEqual(result.maxBytes, 1);
+    assert.strictEqual(result.withinSizeLimit, false);
+    assert.ok(result.byteLength > result.maxBytes);
   });
 });
 
@@ -67,7 +73,7 @@ describe('captureBackup — navigation errors', () => {
     await fs.ensureDir(outDir);
 
     await assert.rejects(
-      () => captureBackup('http://127.0.0.1:9/missing.html', { width: 300, height: 250 }, outDir, 'missing', {
+      () => captureBackup('http://127.0.0.1:9/missing.html', { width: 300, height: 250 }, {
         waitTimeout: 100,
         strategy: 'auto'
       }),
@@ -118,14 +124,14 @@ describe('captureBackup — creative backup contract', () => {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     try {
       const { port } = server.address();
-      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 300, height: 250 }, outDir, 'contract', {
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 300, height: 250 }, {
         waitTimeout: 5000,
         strategy: 'auto'
       });
 
       assert.strictEqual(result.strategy, 'window.generateBackupFrame()');
       assert.ok(called >= 1);
-      assert.ok(await fs.pathExists(path.join(outDir, 'contract.jpg')));
+      assert.ok(result.buffer.length > 0);
     } finally {
       await new Promise(resolve => server.close(resolve));
       await fs.remove(outDir);
@@ -166,7 +172,7 @@ describe('captureBackup — HTML video', () => {
     try {
       const { port } = server.address();
       const startedAt = Date.now();
-      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 40, height: 20 }, outDir, 'video', {
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 40, height: 20 }, {
         waitTimeout: 15000,
         strategy: 'auto',
         quality: 95
@@ -175,7 +181,7 @@ describe('captureBackup — HTML video', () => {
 
       assert.strictEqual(result.strategy, 'HTML video last frame');
       assert.ok(duration < 3000, `expected direct video capture, took ${duration}ms`);
-      const { data } = await sharp(path.join(outDir, 'video.jpg'))
+      const { data } = await sharp(result.buffer)
         .resize(1, 1)
         .raw()
         .toBuffer({ resolveWithObject: true });
@@ -216,14 +222,14 @@ describe('captureBackup — fallback timing', () => {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     try {
       const { port } = server.address();
-      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 20, height: 20 }, outDir, 'fallback', {
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 20, height: 20 }, {
         waitTimeout: 1700,
         strategy: 'auto',
         quality: 95
       });
 
       assert.strictEqual(result.strategy, 'Fallback timeout');
-      const { data } = await sharp(path.join(outDir, 'fallback.jpg'))
+      const { data } = await sharp(result.buffer)
         .resize(1, 1)
         .raw()
         .toBuffer({ resolveWithObject: true });
@@ -264,7 +270,7 @@ describe('captureBackup — fallback timing', () => {
     try {
       const { port } = server.address();
       const startedAt = Date.now();
-      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 40, height: 20 }, outDir, 'stable', {
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 40, height: 20 }, {
         waitTimeout: 8000,
         strategy: 'auto',
         quality: 95
@@ -273,7 +279,7 @@ describe('captureBackup — fallback timing', () => {
 
       assert.strictEqual(result.strategy, 'Fallback timeout');
       assert.ok(duration < 6000, `expected early capture, took ${duration}ms`);
-      const { data } = await sharp(path.join(outDir, 'stable.jpg'))
+      const { data } = await sharp(result.buffer)
         .extract({ left: 10, top: 0, width: 20, height: 20 })
         .resize(1, 1)
         .raw()

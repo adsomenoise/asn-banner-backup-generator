@@ -6,6 +6,7 @@ export const FILE_STATES = ['uploaded', 'queued', 'processing', 'complete', 'fai
 export class FileInfo {
   constructor(props = {}) {
     this.id = props.id || '';
+    this.inputIndex = Number.isInteger(props.inputIndex) ? props.inputIndex : null;
     this.name = props.name || '';
     this.path = props.path || null;
     this.type = props.type || 'zip';
@@ -28,6 +29,7 @@ export class FileInfo {
   toJSON() {
     return {
       fileId: this.id,
+      inputIndex: this.inputIndex,
       fileName: this.name,
       fileType: this.type,
       size: this.size,
@@ -48,7 +50,11 @@ export class Job {
     this.createdAt = props.createdAt || new Date().toISOString();
     this.updatedAt = props.updatedAt || this.createdAt;
     this.expiresAt = props.expiresAt || null;
-    this.files = (props.files || []).map(f => (f instanceof FileInfo ? f : new FileInfo(f)));
+    this.files = (props.files || []).map((f, inputIndex) => {
+      const file = f instanceof FileInfo ? f : new FileInfo(f);
+      if (file.inputIndex === null) file.inputIndex = inputIndex;
+      return file;
+    });
     this.total = props.total || this.files.length;
     this.results = props.results || [];
     this.errors = props.errors || [];

@@ -36,7 +36,7 @@ export default [
     }
   },
   {
-    files: ['src/captureBackup.js'],
+    files: ['src/captureBackup.js', 'src/capture/**/*.js'],
     languageOptions: {
       globals: {
         ...globals.browser,
