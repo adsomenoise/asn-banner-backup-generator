@@ -120,13 +120,47 @@ export function generateRiveHTML(jsFileName, width, height) {
 
       setupCanvas();
 
-      var riveInstance = new rive.Rive({
+      var riveInstance;
+
+      function renderBackupFrame() {
+        if (!riveInstance) return Promise.resolve(false);
+
+        try {
+          if (riveInstance.pause) riveInstance.pause();
+          if (riveInstance.scrub) riveInstance.scrub(Number.MAX_SAFE_INTEGER);
+          if (riveInstance.resizeDrawingSurfaceToCanvas) {
+            riveInstance.resizeDrawingSurfaceToCanvas();
+          }
+        } catch (error) {
+          console.warn("Could not render explicit backup frame:", error);
+          return Promise.resolve(false);
+        }
+
+        return new Promise(function (resolve) {
+          requestAnimationFrame(function () {
+            requestAnimationFrame(function () {
+              window.__backupReady = true;
+              resolve(true);
+            });
+          });
+        });
+      }
+
+      window.generateBackupFrame = renderBackupFrame;
+
+      riveInstance = new rive.Rive({
         src: '${jsSrc}',
         canvas: canvas,
         stateMachines: "State Machine 1",
         autoplay: true,
         onLoad: function () {
           riveInstance.resizeDrawingSurfaceToCanvas();
+          window.riveInstance = riveInstance;
+
+          var params = new URLSearchParams(window.location.search);
+          if (params.get("backup") === "1") {
+            renderBackupFrame();
+          }
         }
       });
 

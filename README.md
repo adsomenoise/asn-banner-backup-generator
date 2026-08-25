@@ -685,7 +685,7 @@ Key data stores (all in-process, no external dependencies):
 5. Serves the banner via a local HTTP server (no `file://` URLs)
 6. Opens the banner in headless Chromium via a reusable Playwright browser pool
 7. Applies backup strategies to reach the final visual state
-8. If no explicit backup hook is available, waits for the configured creative duration and drains queued `requestAnimationFrame` callbacks
+8. If no explicit backup hook is available, samples the rendered viewport until it is visually stable, with the configured creative duration as a hard deadline
 9. Captures a PNG screenshot and compresses to JPEG (multi-tier quality, targets ≤80 KB)
 10. Saves to `output/` with optional dedup suffix
 
@@ -698,6 +698,8 @@ Loads the HTML with `?backup=1` appended. Creatives should check for this parame
 ```js
 window.__backupReady = true;
 ```
+
+Wrappers generated for standalone `.riv` uploads implement this automatically. The ad validator reports whether uploaded ZIP creatives expose a complete contract, and completed files show an actionable warning when capture had to use visual-stability fallback.
 
 ### Strategy 2 — `window.generateBackupFrame()`
 
@@ -719,9 +721,9 @@ If `window.riveInstance` is exposed with a `scrub` method, attempts to scrub to 
 
 ### Strategy 4 — Fallback Timeout
 
-When no explicit backup hook is available, waits until the configured creative duration has elapsed from navigation start, drains queued animation frames, detects canvas stability, then captures whatever is on screen. The default duration is `15000` ms.
+When no explicit backup hook is available, the app samples low-resolution screenshots of the full rendered viewport every 250 ms. It captures early after the visual has remained unchanged for 2 seconds. The configured creative duration remains a hard deadline, and the final available frame is captured if the page never settles. The default deadline is `15000` ms.
 
-This path is slower than the explicit backup contract and can add about 15 seconds per creative. See [Creative Backup Image Contract](docs/creative-backup-contract.md) for implementation examples.
+This covers DOM, CSS, canvas, WebGL, and video motion without changing the creative's `requestAnimationFrame` behavior. The explicit backup contract is still faster and more deterministic. See [Creative Backup Image Contract](docs/creative-backup-contract.md) for implementation examples.
 
 ## Authentication
 

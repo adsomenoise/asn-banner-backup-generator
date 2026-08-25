@@ -5,6 +5,7 @@ import path from 'path';
 import AdmZip from 'adm-zip';
 import {
   checkZipPackage,
+  detectBackupContract,
   detectClickTag,
   detectExternalReferences,
   inspectZipEntries
@@ -80,6 +81,53 @@ describe('validator package checks', () => {
 
     assert.strictEqual(detectClickTag(html), true);
     assert.deepStrictEqual(detectExternalReferences(html), ['https://cdn.example.com/lib.js']);
+  });
+
+  it('detects a complete explicit backup contract', () => {
+    const html = `<script>
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('backup') === '1') window.__backupReady = true;
+      window.generateBackupFrame = function () { window.__backupReady = true; };
+    </script>`;
+
+    assert.deepStrictEqual(detectBackupContract(html), {
+      queryParameter: true,
+      readySignal: true,
+      functionHook: true
+    });
+  });
+
+  it('reports whether ZIP creatives implement the explicit backup contract', async () => {
+    const withHook = await writeZip('with-backup-hook.zip', [{
+      name: 'index.html',
+      content: '<!doctype html><style>body{background:#f00}</style><script>window.generateBackupFrame=function(){window.__backupReady=true;}</script>'
+    }]);
+    const withoutHook = await writeZip('without-backup-hook.zip', [{
+      name: 'index.html',
+      content: '<!doctype html><style>body{background:#f00}</style>'
+    }]);
+
+    const present = await checkZipPackage({
+      filePath: withHook,
+      fileName: 'with-backup-hook.zip',
+      workDir: TEST_TEMP,
+      preset: getPreset('generic')
+    });
+    const missing = await checkZipPackage({
+      filePath: withoutHook,
+      fileName: 'without-backup-hook.zip',
+      workDir: TEST_TEMP,
+      preset: getPreset('generic')
+    });
+
+    assert.ok(codes(present.findings).includes('HAS_BACKUP_HOOK'));
+    assert.ok(!codes(present.findings).includes('MISSING_BACKUP_HOOK'));
+    assert.ok(codes(missing.findings).includes('MISSING_BACKUP_HOOK'));
+    assert.deepStrictEqual(present.metadata.backupContract, {
+      queryParameter: false,
+      readySignal: true,
+      functionHook: true
+    });
   });
 
   it('inspects ZIP entry shape and unsupported entries', async () => {

@@ -13,6 +13,11 @@ const STRATEGIES = {
   FALLBACK_TIMEOUT: 'Fallback timeout'
 };
 
+const VISUAL_SAMPLE_SIZE = 32;
+const VISUAL_POLL_INTERVAL_MS = 250;
+const VISUAL_STABLE_FOR_MS = 2000;
+const VISUAL_PIXEL_DELTA_THRESHOLD = 1;
+
 export async function captureBackup(baseUrl, dimensions, outputDir, baseName, options = {}) {
   const {
     waitTimeout = 15000,
@@ -55,53 +60,6 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
       text: err.message.slice(0, 500),
       stack: err.stack ? err.stack.split('\n').slice(0, 5).join('\n').slice(0, 1000) : null
     });
-  });
-
-  await page.addInitScript(() => {
-    let _pending = new Map();
-    let _id = 0;
-    window.requestAnimationFrame = (cb) => {
-      _pending.set(++_id, cb);
-      return _id;
-    };
-    window.cancelAnimationFrame = (id) => { _pending.delete(id); };
-    window.__drainRAF = (maxFrames = 5000, virtualDuration = 30000) => {
-      const _origPerfNow = performance.now.bind(performance);
-      const msPerFrame = virtualDuration / maxFrames;
-      let virtualNow = _origPerfNow();
-      performance.now = () => virtualNow;
-      let total = 0;
-      while (total < maxFrames) {
-        const batch = Array.from(_pending.values());
-        if (batch.length === 0) break;
-        _pending.clear();
-        for (const cb of batch) {
-          virtualNow += msPerFrame;
-          try { cb(virtualNow); } catch (e) {}
-          total++;
-        }
-      }
-      performance.now = _origPerfNow;
-      return total;
-    };
-    window.__hashViewport = () => {
-      let hash = 0;
-      const add = (v) => { hash = ((hash << 5) - hash) + (v | 0); hash |= 0; };
-      const canvas = document.querySelector('canvas');
-      if (canvas) {
-        try {
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-            for (let i = 0; i < data.length; i += 4) {
-              add(data[i] + (data[i + 1] << 8) + (data[i + 2] << 16) + (data[i + 3] << 24));
-            }
-          }
-        } catch (e) {}
-      }
-      return hash;
-    };
-    window.__pendingCount = () => _pending.size;
   });
 
   try {
@@ -174,57 +132,17 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
         }));
       }
 
-      const elapsed = Date.now() - creativeTimelineStart;
-      const remaining = waitTimeout - elapsed;
-      if (remaining > 0) {
-        log.step(`Waiting ${remaining}ms for fallback end frame...`);
-        await delay(remaining);
-      }
+      const deadlineAt = creativeTimelineStart + waitTimeout;
+      log.step(`Watching for visual stability (hard deadline ${waitTimeout}ms)...`);
+      const stability = await waitForVisualStability(page, {
+        deadlineAt,
+        stableForMs: Math.min(VISUAL_STABLE_FOR_MS, waitTimeout),
+        pollIntervalMs: VISUAL_POLL_INTERVAL_MS
+      });
 
-      const maxFrames = Math.ceil(waitTimeout / 6);
-      const batchSize = 400;
-      let totalDrained = 0;
-      let lastHash = null;
-      let stable = false;
-
-      if (hasCanvas) {
-        log.step('Advancing animation frames...');
-      }
-
-      while (totalDrained < maxFrames && !stable) {
-        const drained = await page.evaluate(
-          ({ frames, virtualDuration }) => window.__drainRAF(frames, virtualDuration),
-          { frames: batchSize, virtualDuration: waitTimeout }
-        );
-        totalDrained += drained;
-
-        const hash = await page.evaluate(() => window.__hashViewport());
-
-        if (drained === 0) {
-          if (lastHash !== null && hash === lastHash) {
-            stable = true;
-          }
-          break;
-        }
-
-        if (drained < batchSize && lastHash !== null && hash === lastHash) {
-          stable = true;
-        }
-
-        lastHash = hash;
-      }
-
-      if (!stable) {
-        const remains = await page.evaluate(() => window.__pendingCount());
-        if (remains === 0) {
-          const hash = await page.evaluate(() => window.__hashViewport());
-          if (lastHash === null || hash === lastHash) {
-            stable = true;
-          }
-        }
-      }
-
-      log.step(`Stable: ${stable}, frames: ${totalDrained}`);
+      log.step(`Visual stability: ${stability.outcome}, samples: ${stability.samples}, changes: ${stability.changes}`);
+      metrics.increment('capture.visual_stability', { outcome: stability.outcome });
+      metrics.timing('capture.visual_stability_duration', stability.duration);
       usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
     }
 
@@ -268,6 +186,63 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
     await context.close();
     pool.release(lease);
   }
+}
+
+export function visualSamplesDiffer(previous, current, threshold = VISUAL_PIXEL_DELTA_THRESHOLD) {
+  if (!previous || !current || previous.length !== current.length) return true;
+
+  let totalDelta = 0;
+  for (let i = 0; i < previous.length; i++) {
+    totalDelta += Math.abs(previous[i] - current[i]);
+  }
+
+  return totalDelta / previous.length > threshold;
+}
+
+async function sampleViewport(page) {
+  const screenshot = await page.screenshot({ type: 'png' });
+  return sharp(screenshot)
+    .resize(VISUAL_SAMPLE_SIZE, VISUAL_SAMPLE_SIZE, { fit: 'fill' })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+}
+
+export async function waitForVisualStability(page, options = {}) {
+  const {
+    deadlineAt = Date.now() + 15000,
+    stableForMs = VISUAL_STABLE_FOR_MS,
+    pollIntervalMs = VISUAL_POLL_INTERVAL_MS,
+    pixelDeltaThreshold = VISUAL_PIXEL_DELTA_THRESHOLD
+  } = options;
+
+  const startedAt = Date.now();
+  let previous = null;
+  let lastChangeAt = startedAt;
+  let samples = 0;
+  let changes = 0;
+
+  while (Date.now() < deadlineAt) {
+    const current = await sampleViewport(page);
+    const sampledAt = Date.now();
+    samples++;
+
+    if (previous && visualSamplesDiffer(previous, current, pixelDeltaThreshold)) {
+      changes++;
+      lastChangeAt = sampledAt;
+    }
+    previous = current;
+
+    if (sampledAt - lastChangeAt >= stableForMs) {
+      return { outcome: 'settled', samples, changes, duration: sampledAt - startedAt };
+    }
+
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) break;
+    await delay(Math.min(pollIntervalMs, remaining));
+  }
+
+  return { outcome: 'timeout', samples, changes, duration: Date.now() - startedAt };
 }
 
 async function checkBackupReady(page) {

@@ -41,6 +41,8 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 
 const APP_VERSION = '1.0.0';
 let AUTH_MODE = 'development';
+const FALLBACK_STRATEGY = 'Fallback timeout';
+const BACKUP_CONTRACT_WARNING = 'Used visual-stability fallback. Add ?backup=1 or window.generateBackupFrame() and set window.__backupReady = true when the final frame is painted for faster, deterministic capture.';
 
 function parseNumberEnv(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -393,6 +395,10 @@ async function processJob(jobId) {
           fileLog.info('Capturing Rive creative', { dimensions: `${dims.width}x${dims.height}` });
           const result = await captureBackup(url, dims, job.resultDir, sanitized, captureOpts);
 
+          if (result.strategy === FALLBACK_STRATEGY) {
+            file.warnings.push(BACKUP_CONTRACT_WARNING);
+          }
+
           keepDir = true;
           file.setState('complete');
           await jobStore.update(jobId, { files: job.files });
@@ -433,6 +439,10 @@ async function processJob(jobId) {
 
           fileLog.info('Capturing ZIP creative', { dimensions: `${dimensions.width}x${dimensions.height}` });
           const result = await captureBackup(url, dimensions, job.resultDir, sanitized, captureOpts);
+
+          if (result.strategy === FALLBACK_STRATEGY) {
+            file.warnings.push(BACKUP_CONTRACT_WARNING);
+          }
 
           keepDir = true;
           file.setState('complete');

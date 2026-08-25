@@ -4,7 +4,7 @@ import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs-extra';
 import http from 'node:http';
-import { captureBackup, processAndSaveImage } from '../src/captureBackup.js';
+import { captureBackup, processAndSaveImage, visualSamplesDiffer } from '../src/captureBackup.js';
 import { closeBrowserPool } from '../src/browserPool.js';
 
 const MAX_FILE_SIZE = 80 * 1024;
@@ -178,5 +178,63 @@ describe('captureBackup — fallback timing', () => {
       await new Promise(resolve => server.close(resolve));
       await fs.remove(outDir);
     }
+  });
+
+  it('captures early after a real animation becomes visually stable', async () => {
+    const outDir = path.resolve('test-temp-capute', 'fallback-stability');
+    await fs.remove(outDir);
+    await fs.ensureDir(outDir);
+
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<!doctype html>
+        <html>
+          <body style="margin:0;background:#fff">
+            <div id="creative" style="width:20px;height:20px;background:#f00"></div>
+            <script>
+              var el = document.getElementById('creative');
+              var started = performance.now();
+              function animate(now) {
+                var elapsed = now - started;
+                el.style.transform = 'translateX(' + Math.min(10, elapsed / 50) + 'px)';
+                if (elapsed < 500) requestAnimationFrame(animate);
+                else el.style.background = '#00ff00';
+              }
+              requestAnimationFrame(animate);
+            </script>
+          </body>
+        </html>`);
+    });
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address();
+      const startedAt = Date.now();
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 40, height: 20 }, outDir, 'stable', {
+        waitTimeout: 8000,
+        strategy: 'auto',
+        quality: 95
+      });
+      const duration = Date.now() - startedAt;
+
+      assert.strictEqual(result.strategy, 'Fallback timeout');
+      assert.ok(duration < 6000, `expected early capture, took ${duration}ms`);
+      const { data } = await sharp(path.join(outDir, 'stable.jpg'))
+        .extract({ left: 10, top: 0, width: 20, height: 20 })
+        .resize(1, 1)
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      assert.ok(data[1] > data[0], `expected green settled frame, got rgb(${data[0]}, ${data[1]}, ${data[2]})`);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+      await fs.remove(outDir);
+    }
+  });
+});
+
+describe('visualSamplesDiffer', () => {
+  it('ignores tiny average pixel noise and detects meaningful changes', () => {
+    assert.strictEqual(visualSamplesDiffer(Buffer.from([10, 10, 10]), Buffer.from([11, 11, 11])), false);
+    assert.strictEqual(visualSamplesDiffer(Buffer.from([10, 10, 10]), Buffer.from([20, 20, 20])), true);
   });
 });

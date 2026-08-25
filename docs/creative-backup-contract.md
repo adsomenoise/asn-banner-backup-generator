@@ -2,6 +2,8 @@
 
 This app can generate backup images much faster when a creative exposes a deterministic backup frame.
 
+Generated wrappers for standalone `.riv` uploads implement this contract automatically. ZIP creatives should implement one of the patterns below. The validator reports `HAS_BACKUP_HOOK` when it detects a complete contract and `MISSING_BACKUP_HOOK` when visual-stability fallback would be required.
+
 ## Fast Path
 
 When capturing a creative, the app loads the creative URL with `?backup=1` appended.
@@ -52,4 +54,6 @@ window.generateBackupFrame = function () {
 
 ## Fallback
 
-If neither `?backup=1` nor `window.generateBackupFrame()` produces a ready signal, the app falls back to waiting until the configured creative duration has elapsed from navigation start, then drains queued animation frames and checks canvas stability. The default fallback duration is 15 seconds. That path is slower than the explicit contract, but is intended to capture the end frame for standard 15-second creatives.
+If neither `?backup=1` nor `window.generateBackupFrame()` produces a ready signal, the app samples low-resolution screenshots of the rendered viewport every 250 ms. It captures as soon as the visual has remained unchanged for 2 seconds. The configured creative duration is retained as a hard deadline (15 seconds by default), after which the final available frame is captured even when motion continues.
+
+This fallback observes DOM, CSS, canvas, WebGL, and video motion without replacing the creative's `requestAnimationFrame`. It is faster than always waiting for the deadline, but the explicit contract remains the most deterministic option.

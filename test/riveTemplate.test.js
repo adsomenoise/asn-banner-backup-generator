@@ -58,4 +58,12 @@ describe('generateRiveHTML', () => {
     const html = generateRiveHTML('test.js', 300, 250);
     assert.match(html, /\(function\s*\(\)/);
   });
+
+  it('implements the explicit backup contract', () => {
+    const html = generateRiveHTML('test.js', 300, 250);
+    assert.match(html, /window\.generateBackupFrame\s*=\s*renderBackupFrame/);
+    assert.match(html, /params\.get\("backup"\)\s*===\s*"1"/);
+    assert.match(html, /window\.__backupReady\s*=\s*true/);
+    assert.match(html, /window\.riveInstance\s*=\s*riveInstance/);
+  });
 });

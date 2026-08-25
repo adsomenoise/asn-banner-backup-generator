@@ -32,6 +32,15 @@ export function detectExternalReferences(html) {
   return urls;
 }
 
+export function detectBackupContract(html) {
+  return {
+    queryParameter: /(?:URLSearchParams|location\.search|[?&]backup(?:=|&|['"`]))/i.test(html),
+    readySignal: /(?:window\s*\.)?__(?:BACKUP_READY__|backupReady)\s*=\s*true/i.test(html),
+    functionHook: /(?:window\s*\.)?generateBackupFrame\s*=/i.test(html) ||
+      /function\s+generateBackupFrame\s*\(/i.test(html)
+  };
+}
+
 export function inspectZipEntries(zipPath, preset) {
   const zip = new AdmZip(zipPath);
   const entries = zip.getEntries().filter(entry => !entry.isDirectory);
@@ -91,6 +100,7 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     entryCount: 0,
     unsupportedEntries: [],
     externalReferences: [],
+    backupContract: null,
     renderable: false
   };
 
@@ -150,6 +160,26 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     metadata.dimensions = dimensions;
     metadata.dimensionSource = inferDimensionSource(html, fileName, dimensions);
     metadata.externalReferences = detectExternalReferences(html);
+    metadata.backupContract = detectBackupContract(html);
+
+    const hasReadyContract = metadata.backupContract.readySignal &&
+      (metadata.backupContract.queryParameter || metadata.backupContract.functionHook);
+
+    if (hasReadyContract) {
+      findings.push(buildFinding('info', 'HAS_BACKUP_HOOK', {
+        title: 'Explicit backup contract detected',
+        message: 'The creative exposes an explicit backup frame and ready signal.',
+        suggestion: 'Keep this contract in place to make backup generation fast and deterministic.',
+        path: metadata.htmlEntry
+      }));
+    } else {
+      findings.push(buildFinding('warning', 'MISSING_BACKUP_HOOK', {
+        title: 'Explicit backup contract missing',
+        message: 'The creative does not expose a complete backup frame contract, so capture must rely on visual stability.',
+        suggestion: 'Handle ?backup=1 or expose window.generateBackupFrame(), then set window.__backupReady = true when the final frame is painted.',
+        path: metadata.htmlEntry
+      }));
+    }
 
     const renderResult = await checkRenderability({
       htmlPath: htmlEntry,

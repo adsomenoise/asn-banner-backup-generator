@@ -24,7 +24,9 @@ export function checkRiveFile({ fileName }) {
     const html = generateRiveHTML(jsFileName, dimensions.width, dimensions.height);
     metadata.wrapperGenerated = html.includes('rive.Rive') &&
       html.includes(`width=${dimensions.width},height=${dimensions.height}`) &&
-      html.includes(jsFileName);
+      html.includes(jsFileName) &&
+      html.includes('window.generateBackupFrame') &&
+      html.includes('window.__backupReady = true');
 
     if (!metadata.wrapperGenerated) {
       findings.push(buildFinding('error', 'RIVE_WRAPPER_FAILED', {
