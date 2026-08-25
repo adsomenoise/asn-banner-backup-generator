@@ -41,6 +41,42 @@ export function detectBackupContract(html) {
   };
 }
 
+function localScriptReferences(html) {
+  const references = [];
+  const pattern = /<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  let match = pattern.exec(html);
+  while (match) {
+    references.push(match[1]);
+    match = pattern.exec(html);
+  }
+  return references;
+}
+
+async function readBackupContractSources(html, htmlEntry, extractRoot) {
+  const sources = [{ path: path.relative(extractRoot, htmlEntry), content: html }];
+  const htmlDir = path.dirname(htmlEntry);
+  const root = path.resolve(extractRoot);
+
+  for (const reference of localScriptReferences(html)) {
+    if (/^(?:https?:|\/\/|data:|javascript:)/i.test(reference)) continue;
+
+    const cleanReference = reference.split(/[?#]/)[0];
+    const scriptPath = path.resolve(htmlDir, cleanReference);
+    if (!scriptPath.startsWith(root + path.sep) || !/\.m?js$/i.test(scriptPath)) continue;
+
+    try {
+      sources.push({
+        path: path.relative(root, scriptPath),
+        content: await fs.readFile(scriptPath, 'utf8')
+      });
+    } catch {
+      // Missing bundled scripts are reported by the normal asset checks.
+    }
+  }
+
+  return sources;
+}
+
 export function inspectZipEntries(zipPath, preset) {
   const zip = new AdmZip(zipPath);
   const entries = zip.getEntries().filter(entry => !entry.isDirectory);
@@ -101,6 +137,7 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     unsupportedEntries: [],
     externalReferences: [],
     backupContract: null,
+    backupContractSources: [],
     renderable: false
   };
 
@@ -160,7 +197,14 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     metadata.dimensions = dimensions;
     metadata.dimensionSource = inferDimensionSource(html, fileName, dimensions);
     metadata.externalReferences = detectExternalReferences(html);
-    metadata.backupContract = detectBackupContract(html);
+    const contractSources = await readBackupContractSources(html, htmlEntry, extractedPath);
+    metadata.backupContract = detectBackupContract(contractSources.map(source => source.content).join('\n'));
+    metadata.backupContractSources = contractSources
+      .filter(source => {
+        const detected = detectBackupContract(source.content);
+        return detected.queryParameter || detected.readySignal || detected.functionHook;
+      })
+      .map(source => source.path);
 
     const hasReadyContract = metadata.backupContract.readySignal &&
       (metadata.backupContract.queryParameter || metadata.backupContract.functionHook);
@@ -168,7 +212,7 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     if (hasReadyContract) {
       findings.push(buildFinding('info', 'HAS_BACKUP_HOOK', {
         title: 'Explicit backup contract detected',
-        message: 'The creative exposes an explicit backup frame and ready signal.',
+        message: `The creative exposes an explicit backup frame and ready signal in ${metadata.backupContractSources.join(', ')}.`,
         suggestion: 'Keep this contract in place to make backup generation fast and deterministic.',
         path: metadata.htmlEntry
       }));

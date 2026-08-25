@@ -198,6 +198,8 @@ For uploaded ZIP creatives, the validator reports:
 - `HAS_BACKUP_HOOK` when it detects a ready signal plus either `?backup=1` handling or `window.generateBackupFrame()`.
 - `MISSING_BACKUP_HOOK` when the creative does not expose a complete explicit contract and would require visual-stability fallback.
 
+Detection covers inline HTML and locally bundled JavaScript referenced by `<script src="...">`; validator metadata identifies the source files containing contract pieces. The contract guide includes copy-ready generic, GSAP, CreateJS, and Rive integration recipes for external creative authors.
+
 Normal job processing also adds an actionable per-file warning whenever capture actually uses the fallback, directing the creative author to the explicit contract.
 
 ### Capture strategies
@@ -207,11 +209,12 @@ Normal job processing also adds an actionable per-file warning whenever capture 
 1. Load with `?backup=1` and wait briefly for `window.__backupReady` or the legacy `window.__BACKUP_READY__`.
 2. Call `window.generateBackupFrame()` when available, supporting synchronous and asynchronous implementations.
 3. Use `window.riveInstance.scrub(Number.MAX_SAFE_INTEGER)` when a compatible instance is exposed.
-4. Sample low-resolution full-viewport screenshots every 250 ms, capture after two seconds of visual stability, or capture the final available frame at the configured hard deadline.
+4. If the creative contains HTML `<video>` elements, pause and seek all of them directly to their final decodable frame.
+5. Sample low-resolution full-viewport screenshots every 250 ms, capture after two seconds of visual stability, or capture the final available frame at the configured hard deadline.
 
 It waits for fonts before taking a clipped PNG screenshot, then converts the screenshot to an optimized JPG. The default target is 80 KiB, using quality tiers `95, 80, 65, 50, 35` plus the caller's preferred quality.
 
-The strategy string for step 4 is currently `Fallback timeout` for both possible outcomes. This label does not mean every capture reached the deadline. The preceding `Visual stability` log records the actual outcome:
+The strategy string for step 5 is currently `Fallback timeout` for both possible outcomes. This label does not mean every capture reached the deadline. The preceding `Visual stability` log records the actual outcome:
 
 - `settled`: the screenshot was triggered early after two seconds without a meaningful visual change.
 - `timeout`: the hard deadline was reached while the visual was still changing.
@@ -232,7 +235,7 @@ The browser pool reuses Playwright browser processes. A global semaphore bounds 
 | Generic motion detection | samples all canvases over real animation time | samples the full rendered viewport over real time and settles after 2 seconds | benchmark the stability window and pixel threshold against the production corpus |
 | Rive completion | wraps `rive.Rive`; recognizes two state names | requires exposed `window.riveInstance.scrub()` or timeout | add state-event support; avoid relying only on scrub |
 | CreateJS | recursively teleports timelines | no dedicated CreateJS adapter | add only if corpus tests show it is needed |
-| Video elements in HTML | seeks to final time | no dedicated HTML-video end-frame action | add `loadedmetadata`/`seeked` handling if required |
+| Video elements in HTML | seeks to `video.duration` | pauses and seeks to the final decodable frame, then waits for paint | current project now bypasses the 15-second fallback for video creatives |
 | Standalone video files | unsupported | supported through ffmpeg | current project is broader |
 | Output | PNG or JPEG, per-item target | always JPG, fixed 80 KiB target | make output policy configurable and return actual target compliance |
 | Delivery | base64 in response | files in result ZIP | support both at the boundary, not in the capture core |

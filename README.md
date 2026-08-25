@@ -685,9 +685,10 @@ Key data stores (all in-process, no external dependencies):
 5. Serves the banner via a local HTTP server (no `file://` URLs)
 6. Opens the banner in headless Chromium via a reusable Playwright browser pool
 7. Applies backup strategies to reach the final visual state
-8. If no explicit backup hook is available, samples the rendered viewport until it is visually stable, with the configured creative duration as a hard deadline
-9. Captures a PNG screenshot and compresses to JPEG (multi-tier quality, targets ≤80 KB)
-10. Saves to `output/` with optional dedup suffix
+8. If the creative contains HTML video, seeks directly to its final decodable frame; standalone video uploads use ffmpeg to extract their last frame
+9. Otherwise, if no explicit backup hook is available, samples the rendered viewport until it is visually stable, with the configured creative duration as a hard deadline
+10. Captures a PNG screenshot and compresses to JPEG (multi-tier quality, targets ≤80 KB)
+11. Saves to `output/` with optional dedup suffix
 
 ## Backup Strategies
 
@@ -700,6 +701,8 @@ window.__backupReady = true;
 ```
 
 Wrappers generated for standalone `.riv` uploads implement this automatically. The ad validator reports whether uploaded ZIP creatives expose a complete contract, and completed files show an actionable warning when capture had to use visual-stability fallback.
+
+The validator inspects both inline HTML and locally bundled JavaScript referenced by `<script src="...">`. Copy-ready generic, GSAP, CreateJS, and Rive integration recipes are available in [Creative Backup Image Contract](docs/creative-backup-contract.md).
 
 ### Strategy 2 — `window.generateBackupFrame()`
 
@@ -719,11 +722,17 @@ The function may be synchronous or async. If it returns `true`, the generator al
 
 If `window.riveInstance` is exposed with a `scrub` method, attempts to scrub to the final frame.
 
-### Strategy 4 — Fallback Timeout
+### Strategy 4 — HTML Video Last Frame
+
+If an HTML creative contains `<video>` elements, the generator pauses all of them, waits for metadata when needed, and seeks directly to each final decodable frame. It waits for the `seeked` event and two browser paint frames before capture. This path does not wait for the normal 15-second creative deadline.
+
+Standalone uploaded video files already bypass Chromium and use ffmpeg to extract the last frame directly.
+
+### Strategy 5 — Fallback Timeout
 
 When no explicit backup hook is available, the app samples low-resolution screenshots of the full rendered viewport every 250 ms. It captures early after the visual has remained unchanged for 2 seconds. The configured creative duration remains a hard deadline, and the final available frame is captured if the page never settles. The default deadline is `15000` ms.
 
-This covers DOM, CSS, canvas, WebGL, and video motion without changing the creative's `requestAnimationFrame` behavior. The explicit backup contract is still faster and more deterministic. See [Creative Backup Image Contract](docs/creative-backup-contract.md) for implementation examples.
+This covers DOM, CSS, canvas, and WebGL motion without changing the creative's `requestAnimationFrame` behavior. HTML and standalone video use the direct last-frame paths above. The explicit backup contract is still faster and more deterministic for other creative types. See [Creative Backup Image Contract](docs/creative-backup-contract.md) for implementation examples.
 
 ## Authentication
 

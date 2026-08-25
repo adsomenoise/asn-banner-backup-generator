@@ -130,6 +130,33 @@ describe('validator package checks', () => {
     });
   });
 
+  it('detects an explicit backup contract implemented in bundled JavaScript', async () => {
+    const zipPath = await writeZip('linked-backup-hook.zip', [
+      {
+        name: 'index.html',
+        content: '<!doctype html><style>body{background:#f00}</style><script src="js/creative.js?v=2"></script>'
+      },
+      {
+        name: 'js/creative.js',
+        content: `window.generateBackupFrame = function () {
+          renderFinalFrame();
+          window.__backupReady = true;
+        };`
+      }
+    ]);
+
+    const result = await checkZipPackage({
+      filePath: zipPath,
+      fileName: 'linked-backup-hook.zip',
+      workDir: TEST_TEMP,
+      preset: getPreset('generic')
+    });
+
+    assert.ok(codes(result.findings).includes('HAS_BACKUP_HOOK'));
+    assert.ok(!codes(result.findings).includes('MISSING_BACKUP_HOOK'));
+    assert.deepStrictEqual(result.metadata.backupContractSources, ['js/creative.js']);
+  });
+
   it('inspects ZIP entry shape and unsupported entries', async () => {
     const zipPath = await writeZip('mixed-assets.zip', [
       { name: 'index.html', content: '<!doctype html>' },

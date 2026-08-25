@@ -10,6 +10,7 @@ const STRATEGIES = {
   QUERY_PARAM: 'Query parameter (?backup=1)',
   GENERATE_BACKUP_FRAME: 'window.generateBackupFrame()',
   RIVE_INSTANCE_SCRUB: 'Rive instance scrub',
+  HTML_VIDEO_LAST_FRAME: 'HTML video last frame',
   FALLBACK_TIMEOUT: 'Fallback timeout'
 };
 
@@ -85,7 +86,14 @@ export async function captureBackup(baseUrl, dimensions, outputDir, baseName, op
     }
     await page.waitForLoadState('load', { timeout: 1000 }).catch(() => {});
 
-    if (strategy === 'auto' || strategy === 'query') {
+    const videoResult = await trySeekHtmlVideosToEnd(page);
+    if (videoResult.found > 0 && videoResult.seeked === videoResult.found) {
+      backupReady = true;
+      usedStrategy = STRATEGIES.HTML_VIDEO_LAST_FRAME;
+      log.step(`Moved ${videoResult.seeked} HTML video element(s) to their final decodable frame`);
+    }
+
+    if (!backupReady && (strategy === 'auto' || strategy === 'query')) {
       backupReady = await checkBackupReady(page);
       if (backupReady) {
         usedStrategy = STRATEGIES.QUERY_PARAM;
@@ -254,6 +262,66 @@ async function checkBackupReady(page) {
     ).then(() => true);
   } catch {
     return false;
+  }
+}
+
+async function trySeekHtmlVideosToEnd(page, timeoutMs = 5000) {
+  try {
+    return await page.evaluate(async (seekTimeoutMs) => {
+      const videos = Array.from(document.querySelectorAll('video'));
+
+      async function waitForMetadata(video) {
+        if (video.readyState > 0 && Number.isFinite(video.duration)) return true;
+        return new Promise(resolve => {
+          const finish = value => {
+            clearTimeout(timer);
+            video.removeEventListener('loadedmetadata', onMetadata);
+            video.removeEventListener('error', onError);
+            resolve(value);
+          };
+          const onMetadata = () => finish(Number.isFinite(video.duration));
+          const onError = () => finish(false);
+          const timer = setTimeout(() => finish(false), seekTimeoutMs);
+          video.addEventListener('loadedmetadata', onMetadata, { once: true });
+          video.addEventListener('error', onError, { once: true });
+          video.load?.();
+        });
+      }
+
+      async function seekVideo(video) {
+        if (!(await waitForMetadata(video)) || video.duration <= 0) return false;
+
+        video.pause();
+        const endTime = Math.max(0, video.duration - Math.min(0.04, video.duration / 2));
+        return new Promise(resolve => {
+          const finish = value => {
+            clearTimeout(timer);
+            video.removeEventListener('seeked', onSeeked);
+            video.removeEventListener('error', onError);
+            resolve(value);
+          };
+          const onSeeked = () => finish(true);
+          const onError = () => finish(false);
+          const timer = setTimeout(() => finish(false), seekTimeoutMs);
+          video.addEventListener('seeked', onSeeked, { once: true });
+          video.addEventListener('error', onError, { once: true });
+          try {
+            video.currentTime = endTime;
+          } catch {
+            finish(false);
+          }
+        });
+      }
+
+      const outcomes = await Promise.all(videos.map(seekVideo));
+      if (outcomes.some(Boolean)) {
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }
+
+      return { found: videos.length, seeked: outcomes.filter(Boolean).length };
+    }, timeoutMs);
+  } catch {
+    return { found: 0, seeked: 0 };
   }
 }
 

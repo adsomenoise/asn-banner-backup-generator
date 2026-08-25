@@ -133,6 +133,60 @@ describe('captureBackup — creative backup contract', () => {
   });
 });
 
+describe('captureBackup — HTML video', () => {
+  it('seeks directly to the final video frame without waiting for visual stability', async () => {
+    const outDir = path.resolve('test-temp-capute', 'html-video');
+    await fs.remove(outDir);
+    await fs.ensureDir(outDir);
+
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<!doctype html>
+        <html>
+          <body style="margin:0;background:#f00">
+            <video id="creative"></video>
+            <script>
+              var video = document.getElementById('creative');
+              Object.defineProperty(video, 'readyState', { value: 4 });
+              Object.defineProperty(video, 'duration', { value: 20 });
+              Object.defineProperty(video, 'currentTime', {
+                set: function (value) {
+                  window.__seekTarget = value;
+                  document.body.style.background = '#00ff00';
+                  setTimeout(function () { video.dispatchEvent(new Event('seeked')); }, 0);
+                }
+              });
+              video.pause = function () {};
+            </script>
+          </body>
+        </html>`);
+    });
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address();
+      const startedAt = Date.now();
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 40, height: 20 }, outDir, 'video', {
+        waitTimeout: 15000,
+        strategy: 'auto',
+        quality: 95
+      });
+      const duration = Date.now() - startedAt;
+
+      assert.strictEqual(result.strategy, 'HTML video last frame');
+      assert.ok(duration < 3000, `expected direct video capture, took ${duration}ms`);
+      const { data } = await sharp(path.join(outDir, 'video.jpg'))
+        .resize(1, 1)
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      assert.ok(data[1] > data[0], `expected green last frame, got rgb(${data[0]}, ${data[1]}, ${data[2]})`);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+      await fs.remove(outDir);
+    }
+  });
+});
+
 describe('captureBackup — fallback timing', () => {
   it('waits for the configured creative duration before screenshotting without a backup hook', async () => {
     const outDir = path.resolve('test-temp-capute', 'fallback-timing');
