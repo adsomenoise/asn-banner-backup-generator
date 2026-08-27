@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import { getCaptureConcurrency } from './config.js';
+import { closePublicEgressProxy } from './capture/publicEgressProxy.js';
 
 export class BrowserPool {
   constructor({ max = getCaptureConcurrency(), launch = launchChromium } = {}) {
@@ -110,7 +111,8 @@ function isBrowserConnected(browser) {
 
 async function launchChromium() {
   return chromium.launch({
-    headless: true
+    headless: true,
+    args: ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp']
   });
 }
 
@@ -124,8 +126,10 @@ export function getBrowserPool(options = {}) {
 }
 
 export async function closeBrowserPool() {
-  if (!sharedPool) return;
-  const pool = sharedPool;
-  sharedPool = null;
-  await pool.close();
+  if (sharedPool) {
+    const pool = sharedPool;
+    sharedPool = null;
+    await pool.close();
+  }
+  await closePublicEgressProxy();
 }

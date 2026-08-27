@@ -55,6 +55,7 @@ describe('renderer network policy', () => {
   it('allows only the creative origin and explicit host allowlist', () => {
     assert.strictEqual(isRequestAllowed('http://localhost:3002/job/app.js', documentUrl), true);
     assert.strictEqual(isRequestAllowed('https://s0.2mdn.net/runtime.js', documentUrl, ['s0.2mdn.net']), true);
+    assert.strictEqual(isRequestAllowed('https://code.createjs.com/createjs.min.js', documentUrl, ['code.createjs.com']), true);
     assert.strictEqual(isRequestAllowed('http://127.0.0.1:8080/admin', documentUrl), false);
     assert.strictEqual(isRequestAllowed('http://169.254.169.254/latest/meta-data', documentUrl), false);
     assert.strictEqual(isRequestAllowed('https://example.com/tracker', documentUrl), false);

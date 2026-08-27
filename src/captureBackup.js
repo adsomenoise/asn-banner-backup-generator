@@ -7,6 +7,7 @@ import { encodeScreenshot } from './capture/outputEncoder.js';
 import { remainingBudget, resolveCapturePolicy } from './capture/policy.js';
 import { assertSafeDimensions } from './utils.js';
 import { installNetworkPolicy } from './capture/networkPolicy.js';
+import { getPublicEgressProxyUrl } from './capture/publicEgressProxy.js';
 
 export async function captureBackup(baseUrl, dimensions, options = {}) {
   assertSafeDimensions(dimensions);
@@ -38,12 +39,18 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
   let page = null;
 
   try {
+    const proxyUrl = await getPublicEgressProxyUrl();
+    const documentHostname = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
     context = await browser.newContext({
       viewport: { width: dimensions.width, height: dimensions.height },
       deviceScaleFactor: 1,
-      serviceWorkers: 'block'
+      serviceWorkers: 'block',
+      proxy: {
+        server: proxyUrl,
+        bypass: documentHostname
+      }
     });
-    await installNetworkPolicy(context, baseUrl, allowedHosts);
+    await installNetworkPolicy(context, baseUrl, allowedHosts, null, true);
     page = await context.newPage();
     await installRiveStateSignal(page, policy.riveEndStateNames);
 
@@ -136,7 +143,10 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
       browserErrors
     };
   } finally {
-    if (context) await context.close().catch(() => {});
+    if (context) {
+      await context.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
+      await context.close().catch(() => {});
+    }
     pool.release(lease);
   }
 }

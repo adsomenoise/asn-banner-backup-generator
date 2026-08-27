@@ -440,8 +440,7 @@ async function processJob(jobId, admissionLease = null) {
           fileLog.info('Capturing Rive creative', { dimensions: `${dims.width}x${dims.height}` });
           const result = await captureBackup(url, dims, {
             ...captureOpts,
-            debugName: sanitized,
-            allowedHosts: ['s0.2mdn.net']
+            debugName: sanitized
           });
           if (signal.aborted) throw new Error('Processing cancelled');
           const outputPath = await writeCaptureResult(result, job.resultDir, sanitized);
@@ -497,7 +496,10 @@ async function processJob(jobId, admissionLease = null) {
           const url = storage.toPublicUrl(port, entry, serveDir);
 
           fileLog.info('Capturing ZIP creative', { dimensions: `${dimensions.width}x${dimensions.height}` });
-          const result = await captureBackup(url, dimensions, { ...captureOpts, debugName: sanitized });
+          const result = await captureBackup(url, dimensions, {
+            ...captureOpts,
+            debugName: sanitized
+          });
           if (signal.aborted) throw new Error('Processing cancelled');
           const outputPath = await writeCaptureResult(result, job.resultDir, sanitized);
           fileLog.info('Backup image saved', { outputPath, format: result.format, byteLength: result.byteLength });

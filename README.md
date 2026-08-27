@@ -908,8 +908,8 @@ Encoding is best-effort. The returned capture result includes `byteLength`, `max
 
 - For platform-managed auth, deploy the service behind an **authenticated reverse proxy** that strips downstream headers and injects a trusted `X-User-Id` (or equivalent) header. The built-in frontend login is a lightweight admin flow for the bundled web UI and stores remembered identity client-side for 14 days.
 - The local file server binds to `localhost` and is never exposed to external traffic.
+- Uploaded creatives may load arbitrary public HTTP(S) and WebSocket resources through a loopback-only forward proxy. The proxy resolves and pins public destinations, rejects credentials and mixed/private DNS answers, and blocks loopback, private, link-local, metadata, multicast, documentation, translation, and other special-use address ranges. Redirected requests are evaluated again by the browser/proxy path.
 - The global rate limiter is an in-memory token bucket — it resets on process restart. For multi-instance deployments, a shared rate limiter (e.g. Redis) should be added via custom middleware.
-- The `--disable-web-security` Playwright flag is required for Rive CDN cross-origin loading and is safe because the URLs Playwright navigates to are always derived from job-scoped storage paths.
 
 ### Known Limitations
 

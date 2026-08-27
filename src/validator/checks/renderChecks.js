@@ -5,6 +5,7 @@ import { getBrowserPool } from '../../browserPool.js';
 import { buildFinding } from '../findings.js';
 import { assertSafeDimensions } from '../../utils.js';
 import { installNetworkPolicy } from '../../capture/networkPolicy.js';
+import { getPublicEgressProxyUrl } from '../../capture/publicEgressProxy.js';
 
 const DEFAULT_RENDER_SAMPLE_DELAY_MS = 2000;
 
@@ -40,16 +41,18 @@ export async function checkRenderability({
     const pool = getBrowserPool();
     lease = await pool.acquire();
     const documentUrl = pathToFileURL(path.resolve(htmlPath)).href;
+    const proxyUrl = await getPublicEgressProxyUrl();
     context = await lease.browser.newContext({
       viewport: {
         width: dimensions.width,
         height: dimensions.height
       },
-      serviceWorkers: 'block'
+      serviceWorkers: 'block',
+      proxy: { server: proxyUrl }
     });
     const rootPath = allowedFileRoot || path.dirname(path.resolve(htmlPath));
     const rootUrl = pathToFileURL(path.resolve(rootPath) + path.sep).href;
-    await installNetworkPolicy(context, documentUrl, [], rootUrl);
+    await installNetworkPolicy(context, documentUrl, [], rootUrl, true);
     const page = await context.newPage();
     await page.goto(documentUrl, {
       waitUntil: 'load',
@@ -81,6 +84,7 @@ export async function checkRenderability({
     }));
   } finally {
     if (context) {
+      await context.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
       await context.close().catch(() => {});
     }
     if (lease) {
