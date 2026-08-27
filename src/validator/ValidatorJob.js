@@ -72,8 +72,8 @@ export class ValidatorJob {
   isOwnedBy(auth) {
     if (!auth) return false;
     if (this.userId && this.userId !== auth.userId) return false;
-    if (this.tenantId && auth.tenantId && this.tenantId !== auth.tenantId) return false;
-    if (this.clientId && auth.clientId && this.clientId !== auth.clientId) return false;
+    if (this.tenantId && this.tenantId !== auth.tenantId) return false;
+    if (this.clientId && this.clientId !== auth.clientId) return false;
     return true;
   }
 

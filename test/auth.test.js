@@ -157,6 +157,51 @@ describe('createAuthMiddleware', () => {
   });
 });
 
+describe('Production auth mode — signed session', () => {
+  let server;
+  let base;
+  let previousPassword;
+
+  before(async () => {
+    previousPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_PASSWORD = 'test-production-password';
+    server = await startWebServer(0, {
+      auth: { mode: 'production', session: { secret: 'test-session-secret' } }
+    });
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+
+  after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    if (previousPassword === undefined) delete process.env.ADMIN_PASSWORD;
+    else process.env.ADMIN_PASSWORD = previousPassword;
+  });
+
+  it('rejects client-asserted identity headers', async () => {
+    const response = await fetch(`${base}/api/v1/jobs/missing`, {
+      headers: { 'x-user-id': 'admin', 'x-auth-user-id': 'admin' }
+    });
+    assert.strictEqual(response.status, 401);
+  });
+
+  it('accepts the signed HttpOnly session issued by login', async () => {
+    const login = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'test-production-password' })
+    });
+    assert.strictEqual(login.status, 200);
+    const cookie = login.headers.get('set-cookie');
+    assert.match(cookie, /bbg_session=/);
+    assert.match(cookie, /HttpOnly/);
+
+    const authenticated = await fetch(`${base}/api/v1/jobs/missing`, {
+      headers: { cookie: cookie.split(';', 1)[0] }
+    });
+    assert.strictEqual(authenticated.status, 404);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Integration tests — production mode with header auth
 // ---------------------------------------------------------------------------
@@ -189,14 +234,14 @@ async function createJob(base, headers) {
   return { status: res.status, body: await json(res) };
 }
 
-describe('Production auth mode — header adapter', () => {
+describe('Trusted proxy auth mode — header adapter', () => {
   let server;
   let base;
 
   before(async () => {
     server = await startWebServer(0, {
       auth: {
-        mode: 'production',
+        mode: 'trusted-proxy',
         headers: {
           userId: 'x-user-id',
           tenantId: 'x-tenant-id',
@@ -390,14 +435,14 @@ describe('Production auth mode — header adapter', () => {
 // Integration tests — legacy routes also enforce auth
 // ---------------------------------------------------------------------------
 
-describe('Production auth — legacy aliases', () => {
+describe('Trusted proxy auth — legacy aliases', () => {
   let server;
   let legacyBase;
 
   before(async () => {
     server = await startWebServer(0, {
       auth: {
-        mode: 'production',
+        mode: 'trusted-proxy',
         headers: { userId: 'x-user-id' }
       }
     });

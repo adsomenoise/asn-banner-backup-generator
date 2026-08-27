@@ -228,7 +228,8 @@ export async function checkZipPackage({ filePath, fileName, workDir, preset }) {
     const renderResult = await checkRenderability({
       htmlPath: htmlEntry,
       dimensions,
-      displayPath: metadata.htmlEntry
+      displayPath: metadata.htmlEntry,
+      allowedFileRoot: extractedPath
     });
     metadata.renderable = renderResult.metadata.rendered && !renderResult.findings.some(finding => finding.code === 'RENDER_FAILED');
     findings.push(...renderResult.findings);

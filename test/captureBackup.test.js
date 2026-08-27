@@ -180,7 +180,9 @@ describe('captureBackup — HTML video', () => {
       const duration = Date.now() - startedAt;
 
       assert.strictEqual(result.strategy, 'HTML video last frame');
-      assert.ok(duration < 3000, `expected direct video capture, took ${duration}ms`);
+      // Keep this comfortably below the 15s fallback while allowing Chromium
+      // startup contention when the complete test suite runs in parallel.
+      assert.ok(duration < 5000, `expected direct video capture, took ${duration}ms`);
       const { data } = await sharp(result.buffer)
         .resize(1, 1)
         .raw()
@@ -189,6 +191,56 @@ describe('captureBackup — HTML video', () => {
     } finally {
       await new Promise(resolve => server.close(resolve));
       await fs.remove(outDir);
+    }
+  });
+});
+
+describe('captureBackup — Rive runtime state', () => {
+  it('recognizes Lachmed terminal states and preserves the creative callback', async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<!doctype html>
+        <html>
+          <body style="margin:0;background:#f00">
+            <script>
+              window.rive = {
+                Rive: class Rive {
+                  constructor(options) {
+                    setTimeout(function () {
+                      options.onStateChange({ data: ['  MAIN_ANIMATION_ROLLOUT  '] });
+                    }, 25);
+                  }
+                }
+              };
+              new rive.Rive({
+                onStateChange: function () {
+                  document.body.style.background = '#00ff00';
+                  window.creativeCallbackCalled = true;
+                }
+              });
+            </script>
+          </body>
+        </html>`);
+    });
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address();
+      const result = await captureBackup(`http://127.0.0.1:${port}/creative.html`, { width: 20, height: 20 }, {
+        strategy: 'auto',
+        quality: 95,
+        policy: {
+          explicitReadyTimeoutMs: 50,
+          riveStateTimeoutMs: 200
+        }
+      });
+
+      assert.strictEqual(result.strategy, 'Rive end state');
+      assert.strictEqual(result.outcome, 'rive-state');
+      const { data } = await sharp(result.buffer).resize(1, 1).raw().toBuffer({ resolveWithObject: true });
+      assert.ok(data[1] > data[0], `expected creative callback's green frame, got rgb(${data[0]}, ${data[1]}, ${data[2]})`);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
     }
   });
 });

@@ -1,4 +1,4 @@
-import { DevAuthAdapter, HeaderAuthAdapter } from './adapter.js';
+import { DevAuthAdapter, HeaderAuthAdapter, SessionAuthAdapter } from './adapter.js';
 
 const DEV_FALLBACK = { userId: 'dev-user', tenantId: 'dev-tenant', clientId: 'dev-client' };
 
@@ -9,6 +9,8 @@ export function createAuthMiddleware(options = {}) {
   if (options.adapter) {
     adapter = options.adapter;
   } else if (mode === 'production') {
+    adapter = new SessionAuthAdapter(options.session || {});
+  } else if (mode === 'trusted-proxy') {
     adapter = new HeaderAuthAdapter(options.headers || {});
   } else {
     adapter = new DevAuthAdapter(options.dev || {});
@@ -18,7 +20,7 @@ export function createAuthMiddleware(options = {}) {
     const identity = adapter.extract(req);
 
     if (!identity || !identity.userId) {
-      if (mode === 'production') {
+      if (mode !== 'development') {
         return res.status(401).json({
           error: 'Missing authentication credentials',
           code: 'UNAUTHORIZED'

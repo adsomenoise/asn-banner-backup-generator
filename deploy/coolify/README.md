@@ -15,9 +15,9 @@ Usage notes
    - PORT=3001
    - CORS_ORIGIN=https://bbg.bannerama.be
    - AUTH_MODE=production
-   - AUTH_USER_ID_HEADER=x-auth-user-id
-   - AUTH_TENANT_ID_HEADER=x-auth-tenant-id
-   - AUTH_CLIENT_ID_HEADER=x-auth-client-id
+   - ADMIN_USERNAME=admin
+   - ADMIN_PASSWORD=<strong-password>
+   - AUTH_SESSION_SECRET=<independent-long-random-secret>
    - RATE_LIMIT_MAX=30
    - CAPTURE_CONCURRENCY=2
    - LOG_LEVEL=info
@@ -25,7 +25,7 @@ Usage notes
 
 3) How the auth headers work
 
-- The app expects the proxy (nginx or your auth gateway) to set the identity headers the app reads.
+- Production authentication uses the app's signed HttpOnly session cookie. The bundled nginx strips client-supplied identity headers.
 - The supplied `nginx.conf` maps incoming request headers named `X-Auth-User-Id`, `X-Auth-Tenant-Id`, `X-Auth-Client-Id` through to the app.
 - If your auth gateway uses different header names (for example `X-Forwarded-User`), update either `AUTH_*` env vars in the app to match, or change the `proxy_set_header` lines in `nginx.conf` to map the gateway headers to the app headers.
 

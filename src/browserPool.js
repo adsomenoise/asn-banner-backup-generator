@@ -8,6 +8,7 @@ export class BrowserPool {
     this.idle = [];
     this.total = 0;
     this.waiting = [];
+    this.tracked = new Set();
     this.closed = false;
   }
 
@@ -19,14 +20,16 @@ export class BrowserPool {
     while (this.idle.length > 0) {
       const browser = this.idle.pop();
       if (isBrowserConnected(browser)) return { browser };
-      this.total--;
+      this.#discard(browser);
       browser.close().catch(() => {});
     }
 
     if (this.total < this.max) {
       this.total++;
       try {
-        return { browser: await this.launch() };
+        const browser = await this.launch();
+        this.#track(browser);
+        return { browser };
       } catch (err) {
         this.total--;
         this.#drainWaiters();
@@ -43,9 +46,8 @@ export class BrowserPool {
     if (!lease?.browser) return;
 
     if (this.closed || !isBrowserConnected(lease.browser)) {
-      this.total--;
+      this.#discard(lease.browser);
       lease.browser.close().catch(() => {});
-      this.#drainWaiters();
       return;
     }
 
@@ -61,12 +63,12 @@ export class BrowserPool {
   async close() {
     this.closed = true;
     const idle = this.idle.splice(0);
-    this.total -= idle.length;
 
     for (const waiter of this.waiting.splice(0)) {
       waiter.reject(new Error('Browser pool is closed'));
     }
 
+    for (const browser of idle) this.#discard(browser);
     await Promise.all(idle.map(browser => browser.close().catch(() => {})));
   }
 
@@ -75,12 +77,30 @@ export class BrowserPool {
     const waiter = this.waiting.shift();
     this.total++;
     this.launch()
-      .then(browser => waiter.resolve({ browser }))
+      .then(browser => {
+        this.#track(browser);
+        waiter.resolve({ browser });
+      })
       .catch(err => {
         this.total--;
         waiter.reject(err);
         this.#drainWaiters();
       });
+  }
+
+  #track(browser) {
+    this.tracked.add(browser);
+    if (typeof browser?.on === 'function') {
+      browser.on('disconnected', () => this.#discard(browser));
+    }
+  }
+
+  #discard(browser) {
+    if (!this.tracked.delete(browser)) return;
+    const idleIndex = this.idle.indexOf(browser);
+    if (idleIndex >= 0) this.idle.splice(idleIndex, 1);
+    this.total = Math.max(0, this.total - 1);
+    this.#drainWaiters();
   }
 }
 
@@ -90,8 +110,7 @@ function isBrowserConnected(browser) {
 
 async function launchChromium() {
   return chromium.launch({
-    headless: true,
-    args: ['--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
+    headless: true
   });
 }
 

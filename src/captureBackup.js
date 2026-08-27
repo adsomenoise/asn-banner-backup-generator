@@ -1,12 +1,15 @@
 import { logger } from './logger.js';
 import { metrics } from './metrics.js';
 import { getBrowserPool } from './browserPool.js';
-import { resolveEndFrame } from './capture/endFrameStrategies.js';
+import { installRiveStateSignal, resolveEndFrame } from './capture/endFrameStrategies.js';
 import { captureScreenshot, saveDebugArtifacts } from './capture/screenshot.js';
 import { encodeScreenshot } from './capture/outputEncoder.js';
 import { remainingBudget, resolveCapturePolicy } from './capture/policy.js';
+import { assertSafeDimensions } from './utils.js';
+import { installNetworkPolicy } from './capture/networkPolicy.js';
 
 export async function captureBackup(baseUrl, dimensions, options = {}) {
+  assertSafeDimensions(dimensions);
   const {
     waitTimeout,
     quality = 90,
@@ -15,6 +18,7 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
     strategy = 'auto',
     debugDir = null,
     debugName = 'capture',
+    allowedHosts = [],
     policy: policyOverrides = {}
   } = options;
 
@@ -30,31 +34,36 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
   const pool = getBrowserPool();
   const lease = await pool.acquire();
   const { browser } = lease;
-  const context = await browser.newContext({
-    viewport: { width: dimensions.width, height: dimensions.height },
-    deviceScaleFactor: 1
-  });
-  const page = await context.newPage();
-
-  page.on('console', message => {
-    if (message.type() === 'error' || message.type() === 'warning') {
-      browserErrors.push({
-        type: message.type(),
-        text: message.text().slice(0, 500),
-        location: message.location()
-      });
-    }
-  });
-
-  page.on('pageerror', error => {
-    browserErrors.push({
-      type: 'pageerror',
-      text: error.message.slice(0, 500),
-      stack: error.stack ? error.stack.split('\n').slice(0, 5).join('\n').slice(0, 1000) : null
-    });
-  });
+  let context = null;
+  let page = null;
 
   try {
+    context = await browser.newContext({
+      viewport: { width: dimensions.width, height: dimensions.height },
+      deviceScaleFactor: 1,
+      serviceWorkers: 'block'
+    });
+    await installNetworkPolicy(context, baseUrl, allowedHosts);
+    page = await context.newPage();
+    await installRiveStateSignal(page, policy.riveEndStateNames);
+
+    page.on('console', message => {
+      if (message.type() === 'error' || message.type() === 'warning') {
+        browserErrors.push({
+          type: message.type(),
+          text: message.text().slice(0, 500),
+          location: message.location()
+        });
+      }
+    });
+
+    page.on('pageerror', error => {
+      browserErrors.push({
+        type: 'pageerror',
+        text: error.message.slice(0, 500),
+        stack: error.stack ? error.stack.split('\n').slice(0, 5).join('\n').slice(0, 1000) : null
+      });
+    });
     let url = baseUrl;
     let creativeTimelineStart = Date.now();
     if (strategy === 'auto' || strategy === 'query') {
@@ -127,7 +136,7 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
       browserErrors
     };
   } finally {
-    await context.close();
+    if (context) await context.close().catch(() => {});
     pool.release(lease);
   }
 }

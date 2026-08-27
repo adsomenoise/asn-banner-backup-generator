@@ -240,9 +240,9 @@ describe('Job', () => {
       assert.strictEqual(job.isOwnedBy({ userId: 'alice', tenantId: 'other' }), false);
     });
 
-    it('skips tenant check when auth has no tenantId', () => {
+    it('rejects tenant-scoped access when auth has no tenantId', () => {
       const job = new Job({ userId: 'alice', tenantId: 'acme' });
-      assert.strictEqual(job.isOwnedBy({ userId: 'alice' }), true);
+      assert.strictEqual(job.isOwnedBy({ userId: 'alice' }), false);
     });
 
     it('enforces clientId when both sides have it', () => {

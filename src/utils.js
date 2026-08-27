@@ -110,7 +110,16 @@ export function delay(ms) {
 
 export function isValidDimension(dim) {
   return dim && typeof dim.width === 'number' && typeof dim.height === 'number' && 
-         dim.width > 0 && dim.height > 0 && dim.width < 10000 && dim.height < 10000;
+         Number.isInteger(dim.width) && Number.isInteger(dim.height) &&
+         dim.width > 0 && dim.height > 0 && dim.width <= 4096 && dim.height <= 4096 &&
+         dim.width * dim.height <= 16 * 1024 * 1024;
+}
+
+export function assertSafeDimensions(dimensions, label = 'Creative') {
+  if (!isValidDimension(dimensions)) {
+    throw new Error(`${label} dimensions ${dimensions?.width}x${dimensions?.height} exceed the safe rendering limit`);
+  }
+  return dimensions;
 }
 
 export const DEFAULT_DIMENSIONS = { width: 300, height: 250 };

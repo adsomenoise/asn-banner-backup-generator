@@ -18,9 +18,8 @@ npm test
 NODE_ENV=production \
 AUTH_MODE=production \
 CORS_ORIGIN=https://your-frontend.example.com \
-AUTH_USER_ID_HEADER=x-auth-user-id \
-AUTH_TENANT_ID_HEADER=x-auth-tenant-id \
-AUTH_CLIENT_ID_HEADER=x-auth-client-id \
+ADMIN_PASSWORD=<strong-password> \
+AUTH_SESSION_SECRET=<long-random-secret> \
 RATE_LIMIT_MAX=30 \
 CAPTURE_CONCURRENCY=3 \
 npm run preflight

@@ -6,6 +6,11 @@ import { logger } from './logger.js';
 
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'];
 const DEFAULT_VIDEO_PROBE_TIMEOUT_MS = 15000;
+const DEFAULT_VIDEO_FRAME_TIMEOUT_MS = 30000;
+const MAX_PROCESS_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_FRAME_BYTES = 64 * 1024 * 1024;
+const MAX_VIDEO_AXIS = 4096;
+const MAX_VIDEO_PIXELS = 16 * 1024 * 1024;
 
 function isVideoFile(filename) {
   return VIDEO_EXTENSIONS.some(ext => filename.toLowerCase().endsWith(ext));
@@ -29,8 +34,28 @@ function createTimeoutGuard(proc, commandName, timeoutMs, reject) {
   };
 }
 
-async function getVideoDimensions(videoPath) {
+function appendBounded(current, chunk, maxBytes, proc, label, finish, reject) {
+  const next = Buffer.byteLength(current) + chunk.length;
+  if (next > maxBytes) {
+    proc.kill('SIGKILL');
+    finish(() => reject(new Error(`${label} exceeded the ${maxBytes} byte output limit`)));
+    return current;
+  }
+  return current + chunk.toString();
+}
+
+function assertVideoDimensions(dimensions) {
+  const { width, height } = dimensions || {};
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 ||
+      width > MAX_VIDEO_AXIS || height > MAX_VIDEO_AXIS || width * height > MAX_VIDEO_PIXELS) {
+    throw new Error(`Video dimensions ${width}x${height} exceed the safe decode limit`);
+  }
+  return dimensions;
+}
+
+async function getVideoDimensions(videoPath, options = {}) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeoutMs || DEFAULT_VIDEO_PROBE_TIMEOUT_MS;
     const proc = spawn('ffprobe', [
       '-v', 'error',
       '-select_streams', 'v:0',
@@ -38,13 +63,14 @@ async function getVideoDimensions(videoPath) {
       '-of', 'csv=p=0',
       videoPath
     ]);
+    const finish = createTimeoutGuard(proc, 'ffprobe', timeoutMs, reject);
 
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', chunk => { stdout += chunk.toString(); });
-    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.stdout.on('data', chunk => { stdout = appendBounded(stdout, chunk, MAX_PROCESS_OUTPUT_BYTES, proc, 'ffprobe stdout', finish, reject); });
+    proc.stderr.on('data', chunk => { stderr = appendBounded(stderr, chunk, MAX_PROCESS_OUTPUT_BYTES, proc, 'ffprobe stderr', finish, reject); });
 
-    proc.on('close', code => {
+    proc.on('close', code => finish(() => {
       if (code !== 0) return reject(new Error(`ffprobe exited with code ${code}: ${stderr}`));
       const parts = stdout.trim().split(',');
       if (parts.length !== 2 || !parts[0] || !parts[1]) {
@@ -53,10 +79,10 @@ async function getVideoDimensions(videoPath) {
       const width = parseInt(parts[0], 10);
       const height = parseInt(parts[1], 10);
       if (!width || !height) return reject(new Error(`Invalid video dimensions: ${width}x${height}`));
-      resolve({ width, height });
-    });
+      resolve(assertVideoDimensions({ width, height }));
+    }));
 
-    proc.on('error', reject);
+    proc.on('error', error => finish(() => reject(error)));
   });
 }
 
@@ -73,8 +99,8 @@ async function getVideoMetadata(videoPath, options = {}) {
 
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', chunk => { stdout += chunk.toString(); });
-    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.stdout.on('data', chunk => { stdout = appendBounded(stdout, chunk, MAX_PROCESS_OUTPUT_BYTES, proc, 'ffprobe stdout', finish, reject); });
+    proc.stderr.on('data', chunk => { stderr = appendBounded(stderr, chunk, MAX_PROCESS_OUTPUT_BYTES, proc, 'ffprobe stderr', finish, reject); });
 
     proc.on('close', code => finish(() => {
       if (code !== 0) return reject(new Error(`ffprobe exited with code ${code}: ${stderr}`));
@@ -127,7 +153,7 @@ async function probeVideoLoudness(videoPath, options = {}) {
     const finish = createTimeoutGuard(proc, 'ffmpeg', timeoutMs, reject);
 
     let stderr = '';
-    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.stderr.on('data', chunk => { stderr = appendBounded(stderr, chunk, MAX_PROCESS_OUTPUT_BYTES, proc, 'ffmpeg stderr', finish, reject); });
 
     proc.on('close', code => finish(() => {
       const integrated = parseIntegratedLoudness(stderr);
@@ -146,9 +172,11 @@ async function probeVideoLoudness(videoPath, options = {}) {
   });
 }
 
-async function extractLastFrame(videoPath) {
+async function extractLastFrame(videoPath, options = {}) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeoutMs || DEFAULT_VIDEO_FRAME_TIMEOUT_MS;
     const buffers = [];
+    let outputBytes = 0;
     const proc = spawn('ffmpeg', [
       '-sseof', '-0.1',
       '-i', videoPath,
@@ -157,20 +185,29 @@ async function extractLastFrame(videoPath) {
       '-vcodec', 'png',
       '-'
     ]);
+    const finish = createTimeoutGuard(proc, 'ffmpeg', timeoutMs, reject);
 
-    proc.stdout.on('data', chunk => buffers.push(chunk));
+    proc.stdout.on('data', chunk => {
+      outputBytes += chunk.length;
+      if (outputBytes > MAX_FRAME_BYTES) {
+        proc.kill('SIGKILL');
+        finish(() => reject(new Error(`ffmpeg frame exceeded the ${MAX_FRAME_BYTES} byte output limit`)));
+        return;
+      }
+      buffers.push(chunk);
+    });
 
     let stderr = '';
-    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.stderr.on('data', chunk => { stderr = appendBounded(stderr, chunk, MAX_PROCESS_OUTPUT_BYTES, proc, 'ffmpeg stderr', finish, reject); });
 
-    proc.on('close', code => {
+    proc.on('close', code => finish(() => {
       if (buffers.length === 0) {
         return reject(new Error(`ffmpeg produced no output (exit ${code}): ${stderr}`));
       }
-      resolve(Buffer.concat(buffers));
-    });
+      resolve(Buffer.concat(buffers, outputBytes));
+    }));
 
-    proc.on('error', reject);
+    proc.on('error', error => finish(() => reject(error)));
   });
 }
 
@@ -237,5 +274,6 @@ export {
   getVideoDimensions,
   getVideoMetadata,
   probeVideoLoudness,
-  VIDEO_EXTENSIONS
+  VIDEO_EXTENSIONS,
+  assertVideoDimensions
 };

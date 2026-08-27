@@ -82,8 +82,9 @@ Key variables:
 - `CORS_ORIGIN` (frontend origin or `*`)
 - `RATE_LIMIT_MAX` (requests per minute per IP for mutation endpoints)
 - `CAPTURE_CONCURRENCY` (1-8, defaults to 3)
+- `WORKLOAD_CONCURRENCY`, `TENANT_WORKLOAD_CONCURRENCY`, `WORKLOAD_QUEUE_MAX` (bounded admission for backup and validator jobs)
 - `AUTH_MODE` (`development` or `production`)
-- `AUTH_USER_ID_HEADER`, `AUTH_TENANT_ID_HEADER`, `AUTH_CLIENT_ID_HEADER` (identity headers expected from your gateway)
+- `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `AUTH_SESSION_SECRET` (production login and signed HttpOnly sessions)
 
 ### Coolify Live Deploy Checklist
 
@@ -95,10 +96,8 @@ When deploying to Coolify, make sure the app is built from the repository `Docke
   - `PORT=3001`
   - `CORS_ORIGIN=https://<your-domain>`
   - `AUTH_MODE=production`
-  - `AUTH_USER_ID_HEADER=x-user-id`
-  - `AUTH_TENANT_ID_HEADER=x-tenant-id`
-  - `AUTH_CLIENT_ID_HEADER=x-client-id`
   - `ADMIN_PASSWORD=<strong-secret>`
+  - `AUTH_SESSION_SECRET=<independent-long-random-secret>`
 3. Mount persistent storage to `/app/temp`.
 4. Keep initial `CAPTURE_CONCURRENCY=2` and increase only after monitoring CPU/RAM.
 
@@ -126,7 +125,7 @@ You should see a Chromium folder (for example `chromium_headless_shell-*`).
 curl -i http://127.0.0.1:3001/api/v1/health
 ```
 
-If `authMode` is `production`, the frontend login flow must complete before upload calls.
+In production mode, the frontend login flow must complete before upload calls.
 Successful frontend logins are remembered in the browser for 14 days.
 
 ## Usage — CLI
@@ -678,7 +677,7 @@ Key data stores (all in-process, no external dependencies):
 - **InMemoryJobStore** — backup generator jobs
 - **ValidatorStore** — validator jobs
 - **BrowserPool** — reusable Playwright Chromium processes (singleton, shared)
-- **Metrics** — in-memory counters and timings, exposed via `/api/v1/health`
+- **Metrics** — in-memory counters and timings, exposed to authenticated callers via `/api/v1/metrics`
 
 ## How It Works
 
@@ -722,17 +721,21 @@ window.generateBackupFrame = async function () {
 
 The function may be synchronous or async. If it returns `true`, the generator also treats the backup frame as ready. The legacy marker `window.__BACKUP_READY__ = true` remains supported for older creatives.
 
-### Strategy 3 — Rive Instance Scrub
+### Strategy 3 — Rive Terminal State
+
+Before creative scripts run, the capture engine wraps the Rive constructor and observes state changes. It captures when Rive enters `end` or `main_animation_rollout`, matching names case-insensitively after trimming whitespace. The creative's own `onStateChange` callback is preserved. Library callers can configure the names with `policy.riveEndStateNames` and the signal wait with `policy.riveStateTimeoutMs`.
+
+### Strategy 4 — Rive Instance Scrub
 
 If `window.riveInstance` is exposed with a `scrub` method, attempts to scrub to the final frame.
 
-### Strategy 4 — HTML Video Last Frame
+### Strategy 5 — HTML Video Last Frame
 
 If an HTML creative contains `<video>` elements, the generator pauses all of them, waits for metadata when needed, and seeks directly to each final decodable frame. It waits for the `seeked` event and two browser paint frames before capture. This path does not wait for the normal 15-second creative deadline.
 
 Standalone uploaded video files already bypass Chromium and use ffmpeg to extract the last frame directly.
 
-### Strategy 5 — Fallback Timeout
+### Strategy 6 — Fallback Timeout
 
 When no explicit backup hook is available, the app samples low-resolution screenshots of the full rendered viewport every 250 ms. It captures early after the visual has remained unchanged for 2 seconds. The configured creative duration remains a hard deadline, and the final available frame is captured if the page never settles. The default deadline is `15000` ms.
 
@@ -764,7 +767,8 @@ await startWebServer(3001, {
 
 | Adapter | Mode | Description |
 |---------|------|-------------|
-| `HeaderAuthAdapter` | `production` | Extracts user/tenant/client identity from trusted HTTP headers set by the parent platform's proxy/ingress. Returns `null` if required headers are missing — the middleware then rejects with `401`. |
+| `SessionAuthAdapter` | `production` | Verifies the signed HttpOnly session issued by the login endpoint. Client-supplied identity headers are ignored. |
+| `HeaderAuthAdapter` | `trusted-proxy` | Extracts identity headers only for an explicitly configured, separately authenticated private gateway. The bundled nginx does not forward client identity headers. |
 | `DevAuthAdapter` | `development` (default) | Returns a configurable default identity (`dev-user` / `dev-tenant` / `dev-client`) when no auth headers are present. Also respects headers if provided, making integration testing easy. |
 
 ### Identity & Ownership
@@ -989,7 +993,7 @@ log.info('Processing file', { fileId, fileType: 'zip' });
 
 #### Health endpoint
 
-The `/api/v1/health` endpoint includes a `metrics` object with all counters and timing summaries (count, sum, min, max, avg, p50, p95, p99):
+The public `/api/v1/health` endpoint contains only liveness data. Authenticated callers can retrieve counters and timing summaries (count, sum, min, max, avg, p50, p95, p99) from `/api/v1/metrics`:
 
 ```json
 {

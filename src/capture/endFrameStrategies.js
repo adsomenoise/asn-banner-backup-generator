@@ -4,6 +4,7 @@ import { delay } from '../utils.js';
 export const STRATEGIES = {
   QUERY_PARAM: 'Query parameter (?backup=1)',
   GENERATE_BACKUP_FRAME: 'window.generateBackupFrame()',
+  RIVE_STATE: 'Rive end state',
   RIVE_INSTANCE_SCRUB: 'Rive instance scrub',
   HTML_VIDEO_LAST_FRAME: 'HTML video last frame',
   FALLBACK_TIMEOUT: 'Fallback timeout'
@@ -14,21 +15,89 @@ const VISUAL_POLL_INTERVAL_MS = 250;
 const VISUAL_STABLE_FOR_MS = 2000;
 const VISUAL_PIXEL_DELTA_THRESHOLD = 1;
 
+export async function installRiveStateSignal(page, stateNames) {
+  await page.addInitScript(names => {
+    const normalizedNames = new Set(names.map(name => name.trim().toLowerCase()));
+
+    function stateNamesFromEvent(event) {
+      const value = event?.data ?? event;
+      if (Array.isArray(value)) return value;
+      if (typeof value === 'string') return [value];
+      if (Array.isArray(value?.states)) return value.states;
+      if (typeof value?.state === 'string') return [value.state];
+      return [];
+    }
+
+    function wrapRiveConstructor(namespace) {
+      if (!namespace || (typeof namespace !== 'object' && typeof namespace !== 'function')) return;
+      let RiveConstructor = namespace.Rive;
+      if (RiveConstructor?.__backupStateWrapped) return;
+
+      function wrap(Constructor) {
+        if (typeof Constructor !== 'function' || Constructor.__backupStateWrapped) return Constructor;
+        const WrappedRive = function (...args) {
+          const options = args[0];
+          if (options && typeof options === 'object') {
+            const creativeCallback = options.onStateChange;
+            args[0] = {
+              ...options,
+              onStateChange(event) {
+                const matched = stateNamesFromEvent(event).some(name =>
+                  typeof name === 'string' && normalizedNames.has(name.trim().toLowerCase())
+                );
+                if (matched) window.__riveEndStateReached = true;
+                if (typeof creativeCallback === 'function') {
+                  return creativeCallback.apply(this, arguments);
+                }
+              }
+            };
+          }
+          return Reflect.construct(Constructor, args, new.target || WrappedRive);
+        };
+        Object.setPrototypeOf(WrappedRive, Constructor);
+        WrappedRive.prototype = Constructor.prototype;
+        Object.defineProperty(WrappedRive, '__backupStateWrapped', { value: true });
+        return WrappedRive;
+      }
+
+      try {
+        Object.defineProperty(namespace, 'Rive', {
+          configurable: true,
+          enumerable: true,
+          get: () => RiveConstructor,
+          set: value => { RiveConstructor = wrap(value); }
+        });
+        if (RiveConstructor) namespace.Rive = RiveConstructor;
+      } catch {
+        if (RiveConstructor) namespace.Rive = wrap(RiveConstructor);
+      }
+    }
+
+    let riveNamespace = window.rive;
+    try {
+      Object.defineProperty(window, 'rive', {
+        configurable: true,
+        enumerable: true,
+        get: () => riveNamespace,
+        set: value => {
+          riveNamespace = value;
+          wrapRiveConstructor(value);
+        }
+      });
+      if (riveNamespace) wrapRiveConstructor(riveNamespace);
+    } catch {
+      if (riveNamespace) wrapRiveConstructor(riveNamespace);
+    }
+  }, stateNames);
+}
+
 export async function resolveEndFrame(page, options) {
   const { strategy, creativeTimelineStart, captureDeadlineAt, policy, log } = options;
   let ready = false;
   let usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
   let outcome = null;
 
-  const videoResult = await trySeekHtmlVideosToEnd(page, policy.videoSeekTimeoutMs);
-  if (videoResult.found > 0 && videoResult.seeked === videoResult.found) {
-    ready = true;
-    usedStrategy = STRATEGIES.HTML_VIDEO_LAST_FRAME;
-    outcome = 'video-seeked';
-    log.step(`Moved ${videoResult.seeked} HTML video element(s) to their final decodable frame`);
-  }
-
-  if (!ready && (strategy === 'auto' || strategy === 'query')) {
+  if (strategy === 'auto' || strategy === 'query') {
     ready = await checkBackupReady(page, policy.explicitReadyTimeoutMs);
     if (ready) {
       usedStrategy = STRATEGIES.QUERY_PARAM;
@@ -41,6 +110,24 @@ export async function resolveEndFrame(page, options) {
     if (ready) {
       usedStrategy = STRATEGIES.GENERATE_BACKUP_FRAME;
       outcome = 'explicit-ready';
+    }
+  }
+
+  if (!ready && strategy === 'auto') {
+    ready = await checkRiveEndState(page, policy.riveStateTimeoutMs);
+    if (ready) {
+      usedStrategy = STRATEGIES.RIVE_STATE;
+      outcome = 'rive-state';
+    }
+  }
+
+  if (!ready) {
+    const videoResult = await trySeekHtmlVideosToEnd(page, policy.videoSeekTimeoutMs);
+    if (videoResult.found > 0 && videoResult.seeked === videoResult.found) {
+      ready = true;
+      usedStrategy = STRATEGIES.HTML_VIDEO_LAST_FRAME;
+      outcome = 'video-seeked';
+      log.step(`Moved ${videoResult.seeked} HTML video element(s) to their final decodable frame`);
     }
   }
 
@@ -159,6 +246,18 @@ async function checkBackupReady(page, timeoutMs = 1000) {
   try {
     return await page.waitForFunction(
       () => window.__backupReady === true || window.__BACKUP_READY__ === true,
+      null,
+      { timeout: timeoutMs }
+    ).then(() => true);
+  } catch {
+    return false;
+  }
+}
+
+async function checkRiveEndState(page, timeoutMs = 1000) {
+  try {
+    return await page.waitForFunction(
+      () => window.__riveEndStateReached === true,
       null,
       { timeout: timeoutMs }
     ).then(() => true);

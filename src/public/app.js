@@ -1,51 +1,11 @@
 // ---------------------------------------------------------------------------
-// Auth session — remember login for 14 days
+// Auth session — the server stores it in a signed, HttpOnly cookie
 // ---------------------------------------------------------------------------
 
-const AUTH_KEY = 'bbg_auth';
-const AUTH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-
-function getAuth() {
-  try {
-    const raw = localStorage.getItem(AUTH_KEY);
-    if (!raw) return null;
-    const payload = JSON.parse(raw);
-    if (!payload || !payload.identity || !payload.expiresAt || Date.now() >= payload.expiresAt) {
-      clearAuth();
-      return null;
-    }
-    return payload.identity;
-  } catch {
-    clearAuth();
-    return null;
-  }
-}
-
-function setAuth(identity) {
-  localStorage.setItem(AUTH_KEY, JSON.stringify({
-    identity,
-    expiresAt: Date.now() + AUTH_TTL_MS
-  }));
-}
-
-function clearAuth() {
-  localStorage.removeItem(AUTH_KEY);
-}
-
-// Inject auth headers into all fetch calls to /api/*
+// Same-origin requests automatically include the signed HttpOnly session cookie.
 const _origFetch = window.fetch;
 window.fetch = function(url, options = {}) {
-  const auth = getAuth();
-  if (auth && typeof url === 'string' && url.startsWith('/api/')) {
-    options = { ...options };
-    options.headers = {
-      ...options.headers,
-      'x-user-id': auth.userId,
-      'x-tenant-id': auth.tenantId,
-      'x-client-id': auth.clientId
-    };
-  }
-  return _origFetch.call(this, url, options);
+  return _origFetch.call(this, url, { credentials: 'same-origin', ...options });
 };
 
 function handleLogin(event) {
@@ -67,8 +27,7 @@ function handleLogin(event) {
       if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Invalid credentials'); });
       return r.json();
     })
-    .then(identity => {
-      setAuth(identity);
+    .then(() => {
       closeLoginDialog();
     })
     .catch(e => {
@@ -84,10 +43,11 @@ function handleLogin(event) {
 
 // On page load, check if auth is needed
 (function init() {
-  if (getAuth()) return;
-  fetch('/api/v1/health').then(r => r.json()).then(h => {
-    if (h.authMode === 'production') {
-      showLoginDialog();
+  fetch('/api/v1/auth/config').then(r => r.json()).then(config => {
+    if (config.required) {
+      fetch('/api/v1/validator/presets').then(response => {
+        if (response.status === 401) showLoginDialog();
+      }).catch(() => showLoginDialog());
     }
   }).catch(() => {});
 })();
@@ -435,17 +395,11 @@ function validationCompleteMessage(job) {
 }
 
 // XHR-based upload with progress tracking.
-// Auth headers are injected from the same session storage as the fetch wrapper above.
+// Same-origin XHR automatically includes the signed HttpOnly session cookie.
 function xhrUpload(url, formData, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
-    const auth = getAuth();
-    if (auth) {
-      xhr.setRequestHeader('x-user-id', auth.userId);
-      xhr.setRequestHeader('x-tenant-id', auth.tenantId);
-      xhr.setRequestHeader('x-client-id', auth.clientId);
-    }
     xhr.upload.addEventListener('progress', event => {
       if (event.lengthComputable) onProgress(event.loaded / event.total * 100);
     });

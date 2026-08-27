@@ -7,6 +7,34 @@ import { metrics } from './metrics.js';
 const MAX_ENTRIES = 1000;
 const MAX_ENTRY_SIZE = 50 * 1024 * 1024;
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024;
+const MAX_COMPRESSION_RATIO = 100;
+
+function declaredSize(entry) {
+  const size = Number(entry?.header?.size);
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error(`ZIP entry ${entry.entryName} has an invalid declared size`);
+  }
+  return size;
+}
+
+function assertDeclaredBudgets(entries, { maxEntries = MAX_ENTRIES, maxEntrySize = MAX_ENTRY_SIZE, maxTotalSize = MAX_TOTAL_SIZE } = {}) {
+  if (entries.length > maxEntries) throw new Error(`ZIP contains ${entries.length} entries (max ${maxEntries})`);
+  let total = 0;
+  for (const entry of entries) {
+    if (entry.isDirectory || shouldIgnore(entry.entryName)) continue;
+    const size = declaredSize(entry);
+    const compressedSize = Number(entry?.header?.compressedSize);
+    if (!Number.isSafeInteger(compressedSize) || compressedSize < 0) {
+      throw new Error(`ZIP entry ${entry.entryName} has an invalid compressed size`);
+    }
+    if (size > 1024 * 1024 && compressedSize > 0 && size / compressedSize > MAX_COMPRESSION_RATIO) {
+      throw new Error(`ZIP entry ${entry.entryName} exceeds the maximum compression ratio`);
+    }
+    if (size > maxEntrySize) throw new Error(`ZIP entry ${entry.entryName} declares ${size} bytes (max ${maxEntrySize})`);
+    total += size;
+    if (total > maxTotalSize) throw new Error(`Total declared extracted size exceeds ${maxTotalSize} bytes`);
+  }
+}
 
 const IGNORED_PATTERNS = [
   '__MACOSX',
@@ -48,6 +76,8 @@ export async function extractZip(zipPath, tempDir, options = {}) {
   try {
     const zip = new AdmZip(zipPath);
     const zipEntries = zip.getEntries();
+
+    assertDeclaredBudgets(zipEntries);
 
     if (zipEntries.length > MAX_ENTRIES) {
       log.warn('ZIP exceeds max entries', { entryCount: zipEntries.length, max: MAX_ENTRIES });
@@ -143,12 +173,13 @@ export async function expandContainerZip(zipPath, uploadDir, options = {}) {
     !shouldIgnore(e.entryName)
   );
 
+  const selectedEntries = entries.slice(0, maxInner);
+  assertDeclaredBudgets(selectedEntries, { maxEntries: maxInner });
+
   const usedNames = new Set();
   const result = [];
 
-  for (const entry of entries) {
-    if (result.length >= maxInner) break;
-
+  for (const entry of selectedEntries) {
     const data = entry.getData();
     const isZip = /\.zip$/i.test(entry.entryName);
     const isRiv = /\.riv$/i.test(entry.entryName);

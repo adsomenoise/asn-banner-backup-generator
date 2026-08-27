@@ -1,9 +1,11 @@
+import { isValidDimension } from './utils.js';
+
 export function parseRivDimensions(fileName) {
   const match = fileName.match(/(\d+)x(\d+)/);
   if (!match) return null;
   const w = parseInt(match[1], 10);
   const h = parseInt(match[2], 10);
-  if (w > 0 && h > 0 && w < 10000 && h < 10000) return { width: w, height: h };
+  if (isValidDimension({ width: w, height: h })) return { width: w, height: h };
   return null;
 }
 

@@ -163,7 +163,7 @@ describe('Metrics', () => {
 });
 
 // -----------------------------------------------------------------------
-// Health endpoint includes metrics
+// Operational metrics endpoint
 // -----------------------------------------------------------------------
 
 describe('Health endpoint metrics', () => {
@@ -180,12 +180,11 @@ describe('Health endpoint metrics', () => {
     if (server) await new Promise(r => server.close(r));
   });
 
-  it('health returns counters and timings', async () => {
-    const res = await fetch('GET', `${baseUrl}/health`);
+  it('metrics returns counters and timings', async () => {
+    const res = await fetch('GET', `${baseUrl}/metrics`);
     assert.strictEqual(res.status, 200);
-    assert.ok(res.body.metrics);
-    assert.ok(typeof res.body.metrics.counters === 'object');
-    assert.ok(typeof res.body.metrics.timings === 'object');
+    assert.ok(typeof res.body.counters === 'object');
+    assert.ok(typeof res.body.timings === 'object');
   });
 
   it('health counters reflect activity', async () => {
@@ -194,8 +193,8 @@ describe('Health endpoint metrics', () => {
     await fetch('POST', `${baseUrl}/jobs`, {
       headers: { 'x-auth-user-id': 'health-test', ...mp.headers }, body: mp.body
     });
-    const res = await fetch('GET', `${baseUrl}/health`);
-    const uploadRejected = Object.keys(res.body.metrics.counters)
+    const res = await fetch('GET', `${baseUrl}/metrics`);
+    const uploadRejected = Object.keys(res.body.counters)
       .find(k => k.startsWith('upload.rejected'));
     assert.ok(uploadRejected, 'Expected upload.rejected counter to exist');
   });

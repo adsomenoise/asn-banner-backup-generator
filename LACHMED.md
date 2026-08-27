@@ -209,9 +209,10 @@ Normal job processing also adds an actionable per-file warning whenever capture 
 
 1. Load with `?backup=1` and wait briefly for `window.__backupReady` or the legacy `window.__BACKUP_READY__`.
 2. Call `window.generateBackupFrame()` when available, supporting synchronous and asynchronous implementations.
-3. Use `window.riveInstance.scrub(Number.MAX_SAFE_INTEGER)` when a compatible instance is exposed.
+3. Observe Rive state changes and capture configured terminal states, defaulting to `end` and `main_animation_rollout`.
 4. If the creative contains HTML `<video>` elements, pause and seek all of them directly to their final decodable frame.
-5. Sample low-resolution full-viewport screenshots every 250 ms, capture after two seconds of visual stability, or capture the final available frame at the configured hard deadline.
+5. Use `window.riveInstance.scrub(Number.MAX_SAFE_INTEGER)` when a compatible instance is exposed.
+6. Sample low-resolution full-viewport screenshots every 250 ms, capture after two seconds of visual stability, or capture the final available frame at the configured hard deadline.
 
 It waits for fonts before taking a clipped PNG screenshot, then converts the screenshot to an optimized JPG. The default target is 80 KiB, using quality tiers `95, 80, 65, 50, 35` plus the caller's preferred quality.
 
@@ -435,7 +436,7 @@ Without this corpus, “parity” is subjective and changes to animation handlin
 Use this priority order:
 
 1. 🟡 **In progress — explicit creative contract:** `?backup=1`, `generateBackupFrame()`, and a ready signal are implemented in generated Rive wrappers, documented in `docs/creative-backup-contract.md`, detected in inline and bundled ZIP JavaScript, and recommended by per-file fallback warnings. Adoption across externally authored creatives remains ongoing.
-2. ⬜ **Not started — explicit runtime signals:** recognize configured Rive state names, including Lachmed's `end` and `main_animation_rollout` conventions. Preserve the creative's own callback.
+2. ✅ **Fixed — explicit runtime signals:** a pre-navigation hook recognizes configurable Rive state names (defaulting to Lachmed's case-insensitive, trimmed `end` and `main_animation_rollout` conventions), reports `outcome: "rive-state"`, and preserves the creative's own callback and arguments.
 3. 🟡 **In progress — technology adapters:** standalone video last-frame extraction, HTML video seeking, and exposed Rive instance scrubbing are implemented and tested. CreateJS teleporting and broader corpus coverage remain outstanding.
 4. ✅ **Fixed — generic visual stability:** low-resolution full-viewport samples run every 250 ms with a two-second stable window and a 15-second hard deadline. This covers DOM and WebGL as well as canvas without replacing the animation scheduler. Production tuning and delayed-start policy remain follow-up validation work.
 5. ✅ **Fixed — hard timeout:** the final available frame is captured at the deadline, processing surfaces a fallback warning, and the transport-neutral capture result reports `outcome: "settled"` or `outcome: "timeout"` independently of the compatibility strategy label.

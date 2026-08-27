@@ -8,11 +8,14 @@ services:
       PORT: "3001"
       CORS_ORIGIN: "https://bbg.mrwolf.be"
       AUTH_MODE: production
-      AUTH_USER_ID_HEADER: x-auth-user-id
-      AUTH_TENANT_ID_HEADER: x-auth-tenant-id
-      AUTH_CLIENT_ID_HEADER: x-auth-client-id
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?AUTH_SESSION_SECRET is required}
       RATE_LIMIT_MAX: "30"
       CAPTURE_CONCURRENCY: "2"
+      WORKLOAD_CONCURRENCY: "2"
+      TENANT_WORKLOAD_CONCURRENCY: "1"
+      WORKLOAD_QUEUE_MAX: "100"
       LOG_LEVEL: info
       LOG_FORMAT: json
     volumes:

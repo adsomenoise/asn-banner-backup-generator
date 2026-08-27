@@ -22,6 +22,7 @@ export async function runValidationForJob(job, options = {}) {
   await fs.ensureDir(workRoot);
 
   for (const file of job.files) {
+    if (options.shouldContinue && !options.shouldContinue()) return job;
     file.setStatus('validating');
 
     try {
@@ -38,6 +39,6 @@ export async function runValidationForJob(job, options = {}) {
     }
   }
 
-  job.setStatus('complete');
+  if (!options.shouldContinue || options.shouldContinue()) job.setStatus('complete');
   return job;
 }

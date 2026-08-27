@@ -18,6 +18,7 @@ import { metrics } from './metrics.js';
 import { getUniqueOutputPath, sanitizeFileName } from './utils.js';
 import { parseRivDimensions, generateRiveHTML } from './riveTemplate.js';
 import { createAuthMiddleware } from './auth/middleware.js';
+import { createSessionToken, SESSION_COOKIE, SESSION_TTL_MS as AUTH_SESSION_TTL_MS } from './auth/adapter.js';
 import { Job, FileInfo } from './jobs/Job.js';
 import { InMemoryJobStore } from './jobs/JobStore.js';
 import { LocalStorage } from './storage/LocalStorage.js';
@@ -26,6 +27,7 @@ import { ValidatorJob, ValidatorFileReport } from './validator/ValidatorJob.js';
 import { ValidatorStore } from './validator/ValidatorStore.js';
 import { getPreset, listPresets } from './validator/presets.js';
 import { runValidationForJob } from './validator/validatorService.js';
+import { AdmissionController, AdmissionRejectedError } from './admissionController.js';
 
 export { parseCaptureConcurrency } from './config.js';
 
@@ -39,6 +41,7 @@ const MAX_CONCURRENT = getCaptureConcurrency();
 const MAX_UPLOAD_SIZE = 200 * 1024 * 1024;
 const MAX_UPLOAD_FILES = 50;
 const SESSION_TTL_MS = 30 * 60 * 1000;
+const PROCESSING_TTL_MS = 30 * 60 * 1000;
 
 const APP_VERSION = '1.0.0';
 let AUTH_MODE = 'development';
@@ -91,7 +94,8 @@ function envDefaults(env = process.env) {
     rateLimitMax: parseNumberEnv(env.RATE_LIMIT_MAX, 30),
     auth: {
       mode: env.AUTH_MODE || (isProd ? 'production' : 'development'),
-      headers: parseHeaderMapEnv(env)
+      headers: parseHeaderMapEnv(env),
+      session: { secret: env.AUTH_SESSION_SECRET || env.ADMIN_PASSWORD || null }
     }
   };
 }
@@ -119,6 +123,11 @@ class Semaphore {
 }
 
 const globalCap = new Semaphore(MAX_CONCURRENT);
+const workloadAdmission = new AdmissionController({
+  maxGlobal: parseNumberEnv(process.env.WORKLOAD_CONCURRENCY, MAX_CONCURRENT),
+  maxPerTenant: parseNumberEnv(process.env.TENANT_WORKLOAD_CONCURRENCY, 1),
+  maxQueued: parseNumberEnv(process.env.WORKLOAD_QUEUE_MAX, 100)
+});
 
 const jobStore = new InMemoryJobStore();
 const validatorStore = new ValidatorStore();
@@ -171,6 +180,11 @@ function validatorCleanupAge(job) {
 
 function isStaleTerminalValidatorJob(job, now = Date.now()) {
   return isTerminalValidatorStatus(job.status) && now - validatorCleanupAge(job) > SESSION_TTL_MS;
+}
+
+function isStaleValidatorJob(job, now = Date.now()) {
+  if (isStaleTerminalValidatorJob(job, now)) return true;
+  return ['uploaded', 'validating'].includes(job.status) && now - validatorCleanupAge(job) > PROCESSING_TTL_MS;
 }
 
 function getFileWorkDir(job, file) {
@@ -279,6 +293,13 @@ function pruneStaleSessions() {
   const now = Date.now();
   jobStore.list().then(jobs => {
     for (const s of jobs) {
+      if (s.status === 'processing' && now - new Date(s.updatedAt).getTime() > PROCESSING_TTL_MS) {
+        jobAbortControllers.get(s.id)?.abort();
+        s.setStatus('error');
+        s.errors.push({ file: 'job', error: 'Processing exceeded the maximum lifetime', friendly: 'Processing timed out. Please retry the job.' });
+        jobStore.update(s.id, { status: s.status, updatedAt: s.updatedAt, errors: s.errors });
+        continue;
+      }
       if (s.status === 'processing') continue;
       if (now - new Date(s.createdAt).getTime() > SESSION_TTL_MS) {
         storage.cleanupJob(s.id);
@@ -289,7 +310,13 @@ function pruneStaleSessions() {
 
   validatorStore.list().then(jobs => {
     for (const job of jobs) {
-      if (isStaleTerminalValidatorJob(job, now)) {
+      if (job.status === 'validating' && isStaleValidatorJob(job, now)) {
+        job.error = 'Validation exceeded the maximum lifetime';
+        job.setStatus('error');
+        validatorStore.update(job.id, { status: job.status, updatedAt: job.updatedAt, error: job.error });
+        continue;
+      }
+      if (isStaleValidatorJob(job, now)) {
         cleanupValidatorJob(job).catch(error => {
           logger.warn('Failed to cleanup stale validator job', { jobId: job.id, error: error.message });
         });
@@ -299,13 +326,13 @@ function pruneStaleSessions() {
 }
 
 async function cleanupValidatorJob(job) {
-  if (!isStaleTerminalValidatorJob(job)) return;
+  if (!isStaleValidatorJob(job)) return;
   if (validatorCleanupInProgress.has(job.id)) return;
 
   validatorCleanupInProgress.add(job.id);
   try {
     const currentJob = await validatorStore.get(job.id);
-    if (!currentJob || !isStaleTerminalValidatorJob(currentJob)) return;
+    if (!currentJob || !isStaleValidatorJob(currentJob)) return;
 
     await Promise.all([
       ...currentJob.files.map(file => file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()),
@@ -314,14 +341,14 @@ async function cleanupValidatorJob(job) {
     ]);
 
     const deletableJob = await validatorStore.get(currentJob.id);
-    if (!deletableJob || !isStaleTerminalValidatorJob(deletableJob)) return;
+    if (!deletableJob || !isStaleValidatorJob(deletableJob)) return;
     await validatorStore.delete(deletableJob.id);
   } finally {
     validatorCleanupInProgress.delete(job.id);
   }
 }
 
-async function processJob(jobId) {
+async function processJob(jobId, admissionLease = null) {
   let fileServer = null;
 
   const job = await jobStore.get(jobId);
@@ -344,6 +371,7 @@ async function processJob(jobId) {
     job.errors.push({ file: 'server', error: `Failed to start local file server: ${err.message}` });
     await jobStore.update(jobId, { status: job.status, errors: job.errors });
     metrics.increment('job.failed', { reason: 'server_start_error' });
+    admissionLease?.release();
     return;
   }
 
@@ -402,7 +430,12 @@ async function processJob(jobId) {
           const url = storage.toPublicUrl(port, htmlFile, serveDir);
 
           fileLog.info('Capturing Rive creative', { dimensions: `${dims.width}x${dims.height}` });
-          const result = await captureBackup(url, dims, { ...captureOpts, debugName: sanitized });
+          const result = await captureBackup(url, dims, {
+            ...captureOpts,
+            debugName: sanitized,
+            allowedHosts: ['s0.2mdn.net']
+          });
+          if (signal.aborted) throw new Error('Processing cancelled');
           const outputPath = await writeCaptureResult(result, job.resultDir, sanitized);
           fileLog.info('Backup image saved', { outputPath, format: result.format, byteLength: result.byteLength });
 
@@ -422,6 +455,7 @@ async function processJob(jobId) {
 
           fileLog.info('Capturing video last frame');
           const result = await captureVideoFrame(file.path, job.resultDir, sanitized);
+          if (signal.aborted) throw new Error('Processing cancelled');
 
           file.setState('complete');
           await jobStore.update(jobId, { files: job.files });
@@ -450,6 +484,7 @@ async function processJob(jobId) {
 
           fileLog.info('Capturing ZIP creative', { dimensions: `${dimensions.width}x${dimensions.height}` });
           const result = await captureBackup(url, dimensions, { ...captureOpts, debugName: sanitized });
+          if (signal.aborted) throw new Error('Processing cancelled');
           const outputPath = await writeCaptureResult(result, job.resultDir, sanitized);
           fileLog.info('Backup image saved', { outputPath, format: result.format, byteLength: result.byteLength });
 
@@ -465,6 +500,11 @@ async function processJob(jobId) {
           return { name: sanitized, type: 'zip', creativeDir: null, inputIndex: file.inputIndex };
         }
       } catch (err) {
+        if (signal.aborted) {
+          file.setState('skipped');
+          await jobStore.update(jobId, { files: job.files });
+          return null;
+        }
         const errorMsg = err.message;
         fileLog.error('File failed', { error: errorMsg, code: 'FILE_PROCESSING_ERROR' });
         file.setState('failed', friendlyFileError(file.name, errorMsg));
@@ -556,6 +596,7 @@ async function processJob(jobId) {
   } finally {
     jobAbortControllers.delete(jobId);
     await stopFileServer(fileServer);
+    admissionLease?.release();
   }
 }
 
@@ -635,6 +676,15 @@ async function validateAndExpandUpload(files, log) {
   return allFiles;
 }
 
+async function admitUploadWork(auth, work) {
+  const lease = await workloadAdmission.acquire(auth?.tenantId || auth?.userId);
+  try {
+    return await work();
+  } finally {
+    lease.release();
+  }
+}
+
 function buildFileInfos(allFiles, startIndex) {
   return allFiles.map((f, i) => new FileInfo({
     id: createFileId(f.originalname, startIndex + i),
@@ -661,8 +711,11 @@ async function handleUpload(req, res) {
 
   let allFiles;
   try {
-    allFiles = await validateAndExpandUpload(files, log);
+    allFiles = await admitUploadWork(auth, () => validateAndExpandUpload(files, log));
   } catch (err) {
+    if (err instanceof AdmissionRejectedError) {
+      return res.status(429).json(errorBody(err.message, err.code));
+    }
     if (err instanceof UploadValidationError) {
       return res.status(400).json(errorBody(err.message, err.code));
     }
@@ -730,8 +783,11 @@ async function handleAppendFiles(req, res) {
 
   let allFiles;
   try {
-    allFiles = await validateAndExpandUpload(files, log);
+    allFiles = await admitUploadWork(auth, () => validateAndExpandUpload(files, log));
   } catch (err) {
+    if (err instanceof AdmissionRejectedError) {
+      return res.status(429).json(errorBody(err.message, err.code));
+    }
     if (err instanceof UploadValidationError) {
       return res.status(400).json(errorBody(err.message, err.code));
     }
@@ -776,19 +832,17 @@ async function handleValidatorUpload(req, res) {
     return res.status(400).json(errorBody('No files uploaded', 'NO_FILES'));
   }
 
-  // Expand container ZIPs into individual entries (same logic as handleUpload).
-  let allFiles = [];
-  for (const f of files) {
-    if (/\.zip$/i.test(f.originalname) && isContainerZip(f.path)) {
-      const inner = await expandContainerZip(f.path, path.dirname(f.path), { maxInner: MAX_UPLOAD_FILES });
-      if (inner.length > 0) {
-        metrics.increment('validator.upload.container_zip_expanded');
-        allFiles.push(...inner.map(i => ({ originalname: i.name, path: i.path, size: i.size })));
-        await fs.remove(f.path).catch(() => {});
-        continue;
-      }
+  let allFiles;
+  try {
+    allFiles = await admitUploadWork(auth, () => validateAndExpandUpload(files, logger.child({ module: 'handleValidatorUpload' })));
+  } catch (error) {
+    if (error instanceof AdmissionRejectedError) {
+      return res.status(429).json(errorBody(error.message, error.code));
     }
-    allFiles.push(f);
+    if (error instanceof UploadValidationError) {
+      return res.status(400).json(errorBody(error.message, error.code));
+    }
+    throw error;
   }
 
   if (allFiles.length > MAX_UPLOAD_FILES) {
@@ -867,10 +921,27 @@ async function handleValidatorStart(req, res) {
     files: job.files
   });
 
+  let admissionLease;
+  try {
+    admissionLease = await workloadAdmission.acquire(auth.tenantId || auth.userId);
+  } catch (error) {
+    job.setStatus('uploaded');
+    await validatorStore.update(job.id, { status: job.status, updatedAt: job.updatedAt });
+    if (error instanceof AdmissionRejectedError) {
+      return res.status(429).json(errorBody(error.message, error.code));
+    }
+    throw error;
+  }
+
   res.json(job.toJSON());
 
-  runValidationForJob(job, { workRoot: validatorWorkRoot(job.id) })
+  runValidationForJob(job, {
+    workRoot: validatorWorkRoot(job.id),
+    shouldContinue: () => job.status === 'validating'
+  })
     .then(async (validatedJob) => {
+      const currentJob = await validatorStore.get(validatedJob.id);
+      if (!currentJob || validatedJob.status !== 'complete') return;
       await validatorStore.update(validatedJob.id, {
         status: validatedJob.status,
         updatedAt: validatedJob.updatedAt,
@@ -880,6 +951,8 @@ async function handleValidatorStart(req, res) {
       metrics.increment('validator.complete');
     })
     .catch(async (error) => {
+      const currentJob = await validatorStore.get(job.id);
+      if (!currentJob || currentJob.status !== 'validating') return;
       job.error = error.message;
       job.setStatus('error');
       await validatorStore.update(job.id, {
@@ -889,7 +962,8 @@ async function handleValidatorStart(req, res) {
         files: job.files
       });
       metrics.increment('validator.failed');
-    });
+    })
+    .finally(() => admissionLease.release());
 }
 
 async function handleValidatorGet(req, res) {
@@ -918,6 +992,16 @@ async function handleStartProcessing(req, res) {
     return res.status(409).json(errorBody('Job is already processing', 'ALREADY_PROCESSING'));
   }
 
+  let admissionLease;
+  try {
+    admissionLease = await workloadAdmission.acquire(auth.tenantId || auth.userId);
+  } catch (error) {
+    if (error instanceof AdmissionRejectedError) {
+      return res.status(429).json(errorBody(error.message, error.code));
+    }
+    throw error;
+  }
+
   job.setStatus('processing');
   job.results = [];
   job.errors = [];
@@ -943,7 +1027,7 @@ async function handleStartProcessing(req, res) {
   const response = job.toJSON();
   res.json(response);
 
-  processJob(job.id);
+  processJob(job.id, admissionLease);
 }
 
 async function handleGetJob(req, res) {
@@ -1041,18 +1125,27 @@ async function handleRetry(req, res) {
     return res.status(400).json(errorBody('Job must be complete, errored, or cancelled to retry', 'INVALID_STATE'));
   }
 
-  let retryCount = 0;
-  for (const f of job.files) {
-    if (f.state === 'failed' || f.state === 'skipped') {
-      f.setState('uploaded');
-      f.setState('queued');
-      retryCount++;
-    }
-  }
+  const retryFiles = job.files.filter(f => f.state === 'failed' || f.state === 'skipped');
+  const retryCount = retryFiles.length;
 
   if (retryCount === 0) {
     log.warn('No files to retry');
     return res.status(400).json(errorBody('No failed or skipped files to retry', 'NOTHING_TO_RETRY'));
+  }
+
+  let admissionLease;
+  try {
+    admissionLease = await workloadAdmission.acquire(auth.tenantId || auth.userId);
+  } catch (error) {
+    if (error instanceof AdmissionRejectedError) {
+      return res.status(429).json(errorBody(error.message, error.code));
+    }
+    throw error;
+  }
+
+  for (const file of retryFiles) {
+    file.setState('uploaded');
+    file.setState('queued');
   }
 
   job.setStatus('processing');
@@ -1076,7 +1169,7 @@ async function handleRetry(req, res) {
   const response = job.toJSON();
   res.json(response);
 
-  processJob(job.id);
+  processJob(job.id, admissionLease);
 }
 
 function handleLogin(req, res) {
@@ -1102,27 +1195,34 @@ function handleLogin(req, res) {
   }
 
   metrics.increment('login.complete');
-  res.json({
+  const identity = {
     userId: process.env.AUTH_USER_ID || username,
     tenantId: process.env.AUTH_TENANT_ID || 'default',
     clientId: process.env.AUTH_CLIENT_ID || 'default'
-  });
+  };
+  const secret = req.app.locals.authSessionSecret || process.env.AUTH_SESSION_SECRET || adminPass;
+  const token = createSessionToken(identity, secret);
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(AUTH_SESSION_TTL_MS / 1000)}${secure}`);
+  res.json(identity);
 }
 
 function handleHealth(req, res) {
-  const m = metrics.snapshot();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     version: APP_VERSION,
-    uptime: process.uptime(),
-    authMode: AUTH_MODE,
-    jobs: jobStore.size,
-    metrics: {
-      counters: m.counters,
-      timings: m.timings
-    }
+    uptime: process.uptime()
   });
+}
+
+function handleMetrics(req, res) {
+  const m = metrics.snapshot();
+  res.json({ jobs: jobStore.size, validators: validatorStore.size, workload: workloadAdmission.snapshot(), counters: m.counters, timings: m.timings });
+}
+
+function handleAuthConfig(req, res) {
+  res.json({ required: AUTH_MODE !== 'development' });
 }
 
 function handleMulterError(err, req, res, next) {
@@ -1211,8 +1311,9 @@ export async function startWebServer(port = 3001, opts = {}) {
 
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-user-id, x-tenant-id, x-client-id');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
   });
@@ -1261,9 +1362,15 @@ export async function startWebServer(port = 3001, opts = {}) {
 
   const authMw = createAuthMiddleware(authOptions);
   AUTH_MODE = authOptions.mode;
+  app.locals.authSessionSecret = authOptions.session?.secret || process.env.AUTH_SESSION_SECRET || process.env.ADMIN_PASSWORD || null;
+
+  if (AUTH_MODE === 'production' && !authOptions.session?.secret) {
+    throw new Error('AUTH_SESSION_SECRET or ADMIN_PASSWORD is required in production mode');
+  }
 
   // Health endpoint is public (registered before auth middleware)
   app.get('/api/v1/health', handleHealth);
+  app.get('/api/v1/auth/config', handleAuthConfig);
 
   // Login endpoint is public (registered before auth middleware)
   app.post('/api/login', rateLimiter, handleLogin);
@@ -1277,6 +1384,7 @@ export async function startWebServer(port = 3001, opts = {}) {
   const v1 = express.Router();
 
   v1.get('/validator/presets', handleValidatorPresets);
+  v1.get('/metrics', handleMetrics);
 
   v1.post('/validator/jobs', rateLimiter, (req, res, next) => {
     req.sessionId = newId();
@@ -1299,8 +1407,11 @@ export async function startWebServer(port = 3001, opts = {}) {
     if (!/^[a-f0-9]{8}$/.test(req.params.jobId)) {
       return res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
     }
-    req.sessionId = req.params.jobId;
-    next();
+    jobStore.get(req.params.jobId).then(job => {
+      if (!assertOwnership(job, req.auth, res)) return;
+      req.sessionId = req.params.jobId;
+      next();
+    }).catch(next);
   }, upload.array('files'), handleAppendFiles);
 
   v1.post('/jobs/:jobId/process', rateLimiter, handleStartProcessing);

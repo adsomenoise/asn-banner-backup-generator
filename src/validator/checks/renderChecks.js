@@ -3,6 +3,8 @@ import { pathToFileURL } from 'url';
 import sharp from 'sharp';
 import { getBrowserPool } from '../../browserPool.js';
 import { buildFinding } from '../findings.js';
+import { assertSafeDimensions } from '../../utils.js';
+import { installNetworkPolicy } from '../../capture/networkPolicy.js';
 
 const DEFAULT_RENDER_SAMPLE_DELAY_MS = 2000;
 
@@ -21,6 +23,7 @@ export async function checkRenderability({
   htmlPath,
   dimensions,
   displayPath = null,
+  allowedFileRoot = null,
   sampleDelayMs = DEFAULT_RENDER_SAMPLE_DELAY_MS
 }) {
   const findings = [];
@@ -33,16 +36,22 @@ export async function checkRenderability({
   let context = null;
 
   try {
+    assertSafeDimensions(dimensions);
     const pool = getBrowserPool();
     lease = await pool.acquire();
+    const documentUrl = pathToFileURL(path.resolve(htmlPath)).href;
     context = await lease.browser.newContext({
       viewport: {
         width: dimensions.width,
         height: dimensions.height
-      }
+      },
+      serviceWorkers: 'block'
     });
+    const rootPath = allowedFileRoot || path.dirname(path.resolve(htmlPath));
+    const rootUrl = pathToFileURL(path.resolve(rootPath) + path.sep).href;
+    await installNetworkPolicy(context, documentUrl, [], rootUrl);
     const page = await context.newPage();
-    await page.goto(pathToFileURL(path.resolve(htmlPath)).href, {
+    await page.goto(documentUrl, {
       waitUntil: 'load',
       timeout: 10000
     });
