@@ -375,9 +375,17 @@ async function processJob(jobId, admissionLease = null) {
     return;
   }
 
-  const port = fileServer.address().port;
+    const port = fileServer.address().port;
 
-  try {
+    try {
+    async function publishResult(result) {
+      job.results = job.results.filter(item => item.fileId !== result.fileId);
+      job.results.push(result);
+      job.results.sort((left, right) => left.inputIndex - right.inputIndex);
+      await jobStore.update(jobId, { files: job.files, results: job.results });
+      return result;
+    }
+
     const tasks = job.files
       .filter(f => f.state === 'queued')
       .map(async (file) => {
@@ -445,10 +453,13 @@ async function processJob(jobId, admissionLease = null) {
 
           keepDir = true;
           file.setState('complete');
-          await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'riv' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
-          return { name: sanitized, type: 'riv', creativeDir, inputIndex: file.inputIndex };
+          return publishResult({
+            fileId: file.id, name: sanitized, type: 'riv', creativeDir, outputPath,
+            inputIndex: file.inputIndex, format: result.format, byteLength: result.byteLength,
+            dimensions: dims, strategy: result.strategy
+          });
         } else if (file.type === 'video') {
           const videoName = path.basename(file.name);
           sanitized = sanitizeFileName(path.parse(videoName).name);
@@ -458,10 +469,13 @@ async function processJob(jobId, admissionLease = null) {
           if (signal.aborted) throw new Error('Processing cancelled');
 
           file.setState('complete');
-          await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'video' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
-          return { name: sanitized, type: 'video', creativeDir: null, inputIndex: file.inputIndex };
+          return publishResult({
+            fileId: file.id, name: sanitized, type: 'video', creativeDir: null,
+            outputPath: result.outputPath, inputIndex: file.inputIndex, format: 'jpeg',
+            byteLength: result.size, dimensions: result.dimensions, strategy: result.strategy
+          });
         } else {
           const zipName = path.basename(file.name, '.zip');
           sanitized = sanitizeFileName(zipName);
@@ -494,10 +508,13 @@ async function processJob(jobId, admissionLease = null) {
 
           keepDir = true;
           file.setState('complete');
-          await jobStore.update(jobId, { files: job.files });
           metrics.increment('file.complete', { type: 'zip' });
           fileLog.info('File complete', { duration: result.duration, strategy: result.strategy });
-          return { name: sanitized, type: 'zip', creativeDir: null, inputIndex: file.inputIndex };
+          return publishResult({
+            fileId: file.id, name: sanitized, type: 'zip', creativeDir: null, outputPath,
+            inputIndex: file.inputIndex, format: result.format, byteLength: result.byteLength,
+            dimensions, strategy: result.strategy
+          });
         }
       } catch (err) {
         if (signal.aborted) {
@@ -514,7 +531,6 @@ async function processJob(jobId, admissionLease = null) {
         return null;
       } finally {
         globalCap.release();
-        await fs.remove(file.path).catch(() => {});
         if (!keepDir) {
           await rmdir(fileWorkDir);
         }
@@ -522,8 +538,6 @@ async function processJob(jobId, admissionLease = null) {
     });
 
     const results = (await Promise.all(tasks)).filter(Boolean);
-    job.results.push(...results);
-    job.results.sort((left, right) => left.inputIndex - right.inputIndex);
 
     if (signal.aborted) {
       log.info('Job cancelled — skipping ZIP build');
@@ -554,7 +568,7 @@ async function processJob(jobId, admissionLease = null) {
         zip.addLocalFile(nestedZipPath, '', `${result.name}.zip`);
       }
 
-      const jpgPath = path.join(job.resultDir, `${result.name}.jpg`);
+      const jpgPath = result.outputPath || path.join(job.resultDir, `${result.name}.jpg`);
       if (await fs.pathExists(jpgPath)) {
         zip.addLocalFile(jpgPath, '', `${result.name}.jpg`);
       }
@@ -1035,10 +1049,70 @@ async function handleGetJob(req, res) {
   if (!assertOwnership(job, req.auth, res)) return;
 
   const response = job.toJSON();
+  response.results = response.results.map(result => ({
+    ...result,
+    preview: `/api/v1/jobs/${job.id}/results/${encodeURIComponent(result.fileId)}/preview`,
+    download: `/api/v1/jobs/${job.id}/results/${encodeURIComponent(result.fileId)}/download`
+  }));
   if (job.status === 'complete') {
     response.download = `/api/v1/jobs/${job.id}/download`;
   }
   res.json(response);
+}
+
+async function handleResultFile(req, res, { download = false } = {}) {
+  const job = await jobStore.get(req.params.jobId);
+  if (!assertOwnership(job, req.auth, res)) return;
+  const result = job.results.find(item => item.fileId === req.params.fileId);
+  if (!result?.outputPath || !(await fs.pathExists(result.outputPath))) {
+    return res.status(404).json(errorBody('Result not found', 'RESULT_NOT_FOUND'));
+  }
+  const extension = extensionForFormat(result.format || 'jpeg');
+  const fileName = `${result.name}${extension}`;
+  if (download) return res.download(result.outputPath, fileName);
+  res.type(result.format === 'png' ? 'png' : 'jpeg');
+  res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
+  res.sendFile(result.outputPath);
+}
+
+async function handleRegenerateFile(req, res) {
+  const job = await jobStore.get(req.params.jobId);
+  const auth = req.auth || {};
+  if (!assertOwnership(job, auth, res)) return;
+  if (!['complete', 'error', 'cancelled'].includes(job.status)) {
+    return res.status(409).json(errorBody('Job is not ready for regeneration', 'INVALID_STATE'));
+  }
+  const file = job.files.find(item => item.id === req.params.fileId);
+  if (!file) return res.status(404).json(errorBody('File not found', 'NOT_FOUND'));
+  if (!(await fs.pathExists(file.path))) {
+    return res.status(410).json(errorBody('Original upload is no longer available', 'SOURCE_EXPIRED'));
+  }
+
+  let admissionLease;
+  try {
+    admissionLease = await workloadAdmission.acquire(auth.tenantId || auth.userId);
+  } catch (error) {
+    if (error instanceof AdmissionRejectedError) {
+      return res.status(429).json(errorBody(error.message, error.code));
+    }
+    throw error;
+  }
+
+  const previous = job.results.find(result => result.fileId === file.id);
+  if (previous?.outputPath) await fs.remove(previous.outputPath).catch(() => {});
+  if (previous?.creativeDir) await fs.remove(previous.creativeDir).catch(() => {});
+  job.results = job.results.filter(result => result.fileId !== file.id);
+  job.errors = job.errors.filter(error => error.file !== file.name);
+  file.error = null;
+  file.warnings = [];
+  file.setState('queued');
+  job.setStatus('processing');
+  await jobStore.update(job.id, {
+    status: job.status, updatedAt: job.updatedAt, files: job.files,
+    results: job.results, errors: job.errors
+  });
+  res.json(job.toJSON());
+  processJob(job.id, admissionLease);
 }
 
 async function handleGetJobFiles(req, res) {
@@ -1149,7 +1223,7 @@ async function handleRetry(req, res) {
   }
 
   job.setStatus('processing');
-  job.results = [];
+  // Preserve successful results while retrying only failed/skipped files.
   job.errors = [];
   job.resultDir = storage.resultDir(job.id);
   await storage.ensureResultDir(job.id);
@@ -1222,7 +1296,9 @@ function handleMetrics(req, res) {
 }
 
 function handleAuthConfig(req, res) {
-  res.json({ required: AUTH_MODE !== 'development' });
+  const required = AUTH_MODE !== 'development';
+  const identity = req.app.locals.extractAuthIdentity?.(req);
+  res.json({ required, authenticated: !required || Boolean(identity?.userId) });
 }
 
 function handleMulterError(err, req, res, next) {
@@ -1362,6 +1438,7 @@ export async function startWebServer(port = 3001, opts = {}) {
 
   const authMw = createAuthMiddleware(authOptions);
   AUTH_MODE = authOptions.mode;
+  app.locals.extractAuthIdentity = authMw.extractIdentity;
   app.locals.authSessionSecret = authOptions.session?.secret || process.env.AUTH_SESSION_SECRET || process.env.ADMIN_PASSWORD || null;
 
   if (AUTH_MODE === 'production' && !authOptions.session?.secret) {
@@ -1423,6 +1500,12 @@ export async function startWebServer(port = 3001, opts = {}) {
   v1.get('/jobs/:jobId', handleGetJob);
 
   v1.get('/jobs/:jobId/files', handleGetJobFiles);
+
+  v1.get('/jobs/:jobId/results/:fileId/preview', (req, res) => handleResultFile(req, res));
+
+  v1.get('/jobs/:jobId/results/:fileId/download', (req, res) => handleResultFile(req, res, { download: true }));
+
+  v1.post('/jobs/:jobId/files/:fileId/regenerate', rateLimiter, handleRegenerateFile);
 
   v1.get('/jobs/:jobId/download', handleDownload);
 

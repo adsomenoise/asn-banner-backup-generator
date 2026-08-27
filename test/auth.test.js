@@ -200,6 +200,22 @@ describe('Production auth mode — signed session', () => {
     });
     assert.strictEqual(authenticated.status, 404);
   });
+
+  it('reports session status without producing an expected 401 response', async () => {
+    const anonymous = await fetch(`${base}/api/v1/auth/config`);
+    assert.strictEqual(anonymous.status, 200);
+    assert.deepStrictEqual(await anonymous.json(), { required: true, authenticated: false });
+
+    const login = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'test-production-password' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';', 1)[0];
+    const signedIn = await fetch(`${base}/api/v1/auth/config`, { headers: { cookie } });
+    assert.strictEqual(signedIn.status, 200);
+    assert.deepStrictEqual(await signedIn.json(), { required: true, authenticated: true });
+  });
 });
 
 // ---------------------------------------------------------------------------

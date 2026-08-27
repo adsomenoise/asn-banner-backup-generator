@@ -260,6 +260,7 @@ async function captureVideoFrame(videoPath, resultDir, baseName) {
   });
 
   return {
+    outputPath,
     dimensions,
     duration,
     strategy: 'video_last_frame',

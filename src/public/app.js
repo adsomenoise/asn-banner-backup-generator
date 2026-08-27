@@ -44,11 +44,7 @@ function handleLogin(event) {
 // On page load, check if auth is needed
 (function init() {
   fetch('/api/v1/auth/config').then(r => r.json()).then(config => {
-    if (config.required) {
-      fetch('/api/v1/validator/presets').then(response => {
-        if (response.status === 401) showLoginDialog();
-      }).catch(() => showLoginDialog());
-    }
+    if (config.required && !config.authenticated) showLoginDialog();
   }).catch(() => {});
 })();
 
@@ -56,6 +52,7 @@ let sessionId = null;
 let sessionFiles = [];    // { id, name, type, state, error }
 let polling = false;
 let completed = false;
+let galleryResults = [];
 
 const backupModeBtn = document.getElementById('backupModeBtn');
 const validatorModeBtn = document.getElementById('validatorModeBtn');
@@ -73,6 +70,9 @@ const progressWrap = document.getElementById('progressWrap');
 const progressBar = document.getElementById('progressBar');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
+const campaignGallery = document.getElementById('campaignGallery');
+const campaignGallerySummary = document.getElementById('campaignGallerySummary');
+const galleryGrid = document.getElementById('galleryGrid');
 const overlay = document.getElementById('overlay');
 const waitingText = document.getElementById('waitingText');
 const errorSummary = document.getElementById('errorSummary');
@@ -537,6 +537,44 @@ function renderFileList() {
     }
   });
 }
+
+function renderCampaignGallery(results = galleryResults) {
+  galleryResults = results || [];
+  if (galleryResults.length === 0) {
+    campaignGallery.classList.add('hidden');
+    galleryGrid.innerHTML = '';
+    return;
+  }
+
+  campaignGallery.classList.remove('hidden');
+  campaignGallerySummary.textContent = `${galleryResults.length} ${plural(galleryResults.length, 'backup')} ready for review`;
+  galleryGrid.innerHTML = galleryResults.map(result => {
+    const dimensions = result.dimensions ? `${result.dimensions.width}×${result.dimensions.height}` : 'Dimensions unavailable';
+    const size = result.byteLength ? formatFileSize(result.byteLength) : 'Size unavailable';
+    const strategy = result.strategy || 'Automatic capture';
+    const file = sessionFiles.find(item => item.id === result.fileId);
+    const sourceName = file?.name || result.name;
+    return `
+      <article class="preview-card" data-result-file-id="${escapeHtml(result.fileId)}">
+        <div class="preview-stage">
+          <img src="${escapeHtml(result.preview)}" alt="Backup preview for ${escapeHtml(sourceName)}" loading="lazy">
+        </div>
+        <div class="preview-details">
+          <h3 class="preview-name" title="${escapeHtml(sourceName)}">${escapeHtml(sourceName)}</h3>
+          <p class="preview-meta">${escapeHtml(dimensions)} · ${escapeHtml(size)}<br>${escapeHtml(strategy)}</p>
+          <div class="preview-actions">
+            <a class="btn btn-secondary" href="${escapeHtml(result.download)}" download>Download</a>
+            <button class="btn btn-retry regenerate-file-btn" type="button" data-file-id="${escapeHtml(result.fileId)}">Regenerate</button>
+          </div>
+        </div>
+      </article>`;
+  }).join('');
+}
+
+galleryGrid.addEventListener('click', event => {
+  const button = event.target.closest('.regenerate-file-btn');
+  if (button) startFileRegeneration(button.dataset.fileId);
+});
 
 function stateBadgeContent(state) {
   switch (state) {
@@ -1065,11 +1103,46 @@ async function startRetry() {
   pollStatus();
 }
 
+async function startFileRegeneration(fileId) {
+  if (!sessionId || polling) return;
+  const card = galleryGrid.querySelector(`[data-result-file-id="${CSS.escape(fileId)}"]`);
+  const button = card?.querySelector('.regenerate-file-btn');
+  card?.classList.add('is-regenerating');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Regenerating…';
+  }
+
+  const response = await fetch(`/api/v1/jobs/${sessionId}/files/${encodeURIComponent(fileId)}/regenerate`, { method: 'POST' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Regeneration failed' }));
+    card?.classList.remove('is-regenerating');
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Regenerate';
+    }
+    showToast(error.error || 'Regeneration failed', 'error');
+    return;
+  }
+
+  completed = false;
+  processBtn.disabled = true;
+  downloadBtn.classList.add('hidden');
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
+  progressWrap.classList.add('visible');
+  progressText.textContent = 'Regenerating selected backup…';
+  polling = true;
+  pollStatus();
+}
+
 async function pollStatus() {
   while (polling) {
     try {
       const res = await fetch(`/api/v1/jobs/${sessionId}?_=${Date.now()}`);
       const data = await res.json();
+
+      if (data.results) renderCampaignGallery(data.results);
 
       if (data.files) {
         data.files.forEach(sf => {
@@ -1116,6 +1189,7 @@ async function pollStatus() {
         processBtn.classList.add('hidden');
 
         if (successCount > 0) {
+          renderCampaignGallery(data.results || []);
           downloadBtn.classList.remove('hidden');
           downloadBtn.focus();
         }
@@ -1216,6 +1290,7 @@ resetBtn.addEventListener('click', resetUI);
 function resetUI() {
   sessionId = null;
   sessionFiles = [];
+  galleryResults = [];
   completed = false;
   fileList.classList.remove('visible');
   fileList.innerHTML = '';
@@ -1227,6 +1302,8 @@ function resetUI() {
   retryBtn.classList.add('hidden');
   resetBtn.classList.add('hidden');
   progressWrap.classList.remove('visible');
+  campaignGallery.classList.add('hidden');
+  galleryGrid.innerHTML = '';
   hideErrorSummary();
 }
 

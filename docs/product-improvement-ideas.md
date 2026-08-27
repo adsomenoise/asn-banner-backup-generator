@@ -174,7 +174,7 @@ The following should take priority before the service is widened to untrusted or
 ## Suggested Sequence
 
 1. [x] Strengthen security boundaries and resource limits. Completed 2026-08-27.
-2. Add result previews, campaign gallery, and per-file regeneration.
+2. [x] Add result previews, campaign gallery, and per-file regeneration. Completed 2026-08-27.
 3. Combine validation and backup generation into one workflow.
 4. Add durable job history and exportable reports.
 5. Add multi-preset and custom validation.

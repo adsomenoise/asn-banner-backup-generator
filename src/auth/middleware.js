@@ -16,7 +16,7 @@ export function createAuthMiddleware(options = {}) {
     adapter = new DevAuthAdapter(options.dev || {});
   }
 
-  return function authMiddleware(req, res, next) {
+  function authMiddleware(req, res, next) {
     const identity = adapter.extract(req);
 
     if (!identity || !identity.userId) {
@@ -32,5 +32,8 @@ export function createAuthMiddleware(options = {}) {
 
     req.auth = identity;
     next();
-  };
+  }
+
+  authMiddleware.extractIdentity = req => adapter.extract(req);
+  return authMiddleware;
 }

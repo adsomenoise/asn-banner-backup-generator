@@ -107,7 +107,16 @@ export class Job {
         failed: this.failedCount,
         results: this.resultsCount
       },
-      canRetry: this.failedCount > 0 && (this.status === 'complete' || this.status === 'error')
+      canRetry: this.failedCount > 0 && (this.status === 'complete' || this.status === 'error'),
+      results: this.results.map(result => ({
+        fileId: result.fileId,
+        name: result.name,
+        type: result.type,
+        format: result.format || 'jpeg',
+        byteLength: result.byteLength || result.size || null,
+        dimensions: result.dimensions || null,
+        strategy: result.strategy || null
+      }))
     };
   }
 }

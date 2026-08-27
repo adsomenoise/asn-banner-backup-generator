@@ -2,11 +2,22 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { chromium } from 'playwright';
 import AdmZip from 'adm-zip';
+import { closeBrowserPool } from '../src/browserPool.js';
 import { startWebServer } from '../src/webServer.js';
 
 function zipWithoutHtml() {
   const zip = new AdmZip();
   zip.addFile('asset.txt', Buffer.from('not an html creative'));
+  return zip.toBuffer();
+}
+
+function previewableZip() {
+  const zip = new AdmZip();
+  zip.addFile('index.html', Buffer.from(`<!doctype html><html><head>
+    <meta name="ad.size" content="width=120,height=80"></head>
+    <body style="margin:0;background:#16a34a"><script>
+    window.generateBackupFrame = async () => { window.__backupReady = true; return true; };
+    </script></body></html>`));
   return zip.toBuffer();
 }
 
@@ -24,6 +35,7 @@ describe('Frontend processing UI', () => {
 
   after(async () => {
     if (browser) await browser.close();
+    await closeBrowserPool();
     if (server) await new Promise(resolve => server.close(resolve));
   });
 
@@ -111,6 +123,31 @@ describe('Frontend processing UI', () => {
 
     assert.strictEqual(await page.evaluate(() => localStorage.getItem('bbg_auth')), null);
 
+    await page.close();
+  });
+
+  it('renders a campaign preview gallery and regenerates one file', async () => {
+    const page = await browser.newPage();
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+    await page.setInputFiles('#fileInput', {
+      name: 'campaign_120x80.zip',
+      mimeType: 'application/zip',
+      buffer: previewableZip()
+    });
+    await page.click('#processBtn');
+    await page.waitForSelector('.preview-card img', { timeout: 15_000 });
+
+    assert.strictEqual(await page.locator('.preview-card').count(), 1);
+    assert.match(await page.locator('.preview-meta').textContent(), /120×80/);
+    assert.strictEqual(await page.locator('.preview-actions a').textContent(), 'Download');
+
+    await page.click('.regenerate-file-btn');
+    await page.waitForFunction(
+      () => document.querySelector('.regenerate-file-btn')?.textContent === 'Regenerate' &&
+        document.querySelector('#progressText')?.textContent?.startsWith('Complete.'),
+      { timeout: 15_000 }
+    );
+    assert.strictEqual(await page.locator('.preview-card').count(), 1);
     await page.close();
   });
 

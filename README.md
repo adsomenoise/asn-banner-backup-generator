@@ -231,6 +231,9 @@ All API endpoints are versioned under `/api/v1/`. Legacy `/api/` routes remain a
 | `POST` | `/api/v1/jobs/{jobId}/process` | Start processing a job |
 | `GET` | `/api/v1/jobs/{jobId}` | Get job status with per-file details |
 | `GET` | `/api/v1/jobs/{jobId}/files` | Get per-file details only |
+| `GET` | `/api/v1/jobs/{jobId}/results/{fileId}/preview` | Preview one generated image inline |
+| `GET` | `/api/v1/jobs/{jobId}/results/{fileId}/download` | Download one generated image |
+| `POST` | `/api/v1/jobs/{jobId}/files/{fileId}/regenerate` | Regenerate one result from its retained source |
 | `GET` | `/api/v1/jobs/{jobId}/download` | Download result ZIP |
 | `GET` | `/api/v1/validator/presets` | List validator presets |
 | `POST` | `/api/v1/validator/jobs` | Create a validator job and upload files |
@@ -388,11 +391,24 @@ Get the full job status, including per-file states and progress counters.
     "failed": 1,
     "results": 1
   },
+  "results": [
+    {
+      "fileId": "001-banner_300x250",
+      "name": "banner_300x250",
+      "type": "zip",
+      "format": "jpeg",
+      "byteLength": 38214,
+      "dimensions": { "width": 300, "height": 250 },
+      "strategy": "window.generateBackupFrame()",
+      "preview": "/api/v1/jobs/a1b2c3d4/results/001-banner_300x250/preview",
+      "download": "/api/v1/jobs/a1b2c3d4/results/001-banner_300x250/download"
+    }
+  ],
   "download": "/api/v1/jobs/a1b2c3d4/download"
 }
 ```
 
-The `download` field is present only when `status` is `complete` and at least one file succeeded.
+Successful results include display metadata and authenticated preview/download URLs. The top-level `download` field is present when the job is complete.
 
 **Error responses**
 - `404` — `NOT_FOUND` (unknown `jobId`)
@@ -433,6 +449,14 @@ Download the result ZIP archive. Each successful file's JPG is included. Failed 
 **Error responses**
 - `404` — `NOT_FOUND` (unknown `jobId` or result file missing)
 - `400` — `NOT_COMPLETE` (job is still processing or not yet started)
+
+---
+
+### Individual result preview, download, and regeneration
+
+Use `GET /api/v1/jobs/{jobId}/results/{fileId}/preview` to display a generated image inline, or the corresponding `/download` route to download that image as an attachment. Both routes return `404 RESULT_NOT_FOUND` when the result or artifact is unavailable.
+
+Use `POST /api/v1/jobs/{jobId}/files/{fileId}/regenerate` after a job reaches a terminal state. It queues only the selected source file, preserves the campaign's other successful results, and returns the updated job. Poll the normal job-status endpoint until processing completes. Retained sources expire with the job; an unavailable source returns `410 SOURCE_EXPIRED`.
 
 ---
 

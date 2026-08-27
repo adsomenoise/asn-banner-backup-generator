@@ -375,6 +375,26 @@ body {
 }
 .overlay-file .status-dot.queued { background: #6b7280; }
 .overlay-file .status-dot.processing { background: #fbbf24; animation: pulse .6s ease-in-out infinite; }
+
+.campaign-gallery { margin-top: 2rem; }
+.gallery-heading { display: flex; justify-content: space-between; align-items: end; gap: 1rem; margin-bottom: 1rem; }
+.gallery-heading h2 { margin: 0.15rem 0 0; font-size: 1.35rem; }
+.gallery-heading > p { margin: 0; color: var(--text-muted); font-size: 0.875rem; }
+.gallery-eyebrow { margin: 0; color: var(--accent); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+.gallery-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+.preview-card { display: flex; flex-direction: column; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); }
+.preview-stage { display: grid; place-items: center; min-height: 180px; padding: 1rem; background: repeating-conic-gradient(#f2f2f2 0 25%, #fff 0 50%) 50% / 16px 16px; }
+.preview-stage img { display: block; max-width: 100%; max-height: 260px; object-fit: contain; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14); }
+.preview-details { padding: 0.9rem; }
+.preview-name { overflow: hidden; margin: 0 0 0.35rem; font-size: 0.92rem; text-overflow: ellipsis; white-space: nowrap; }
+.preview-meta { margin: 0; color: var(--text-muted); font-size: 0.76rem; line-height: 1.45; }
+.preview-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.8rem; }
+.preview-actions .btn { flex: 1; min-width: 88px; padding: 0.55rem 0.65rem; font-size: 0.76rem; }
+.preview-card.is-regenerating { opacity: 0.65; }
+
+@media (max-width: 560px) {
+  .gallery-heading { align-items: start; flex-direction: column; }
+}
 .overlay-file .status-dot.validating { background: #fbbf24; animation: pulse .6s ease-in-out infinite; }
 .overlay-file .status-dot.complete { background: #10b981; }
 .overlay-file .status-dot.pass { background: #10b981; }
