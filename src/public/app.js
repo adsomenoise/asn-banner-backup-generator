@@ -1019,21 +1019,7 @@ processBtn.addEventListener('click', () => startProcessing());
 async function startProcessing() {
   if (!sessionId) return;
 
-  processBtn.disabled = true;
-  downloadBtn.classList.add('hidden');
-  retryBtn.classList.add('hidden');
-  resetBtn.classList.add('hidden');
-  cancelBtn.disabled = false;
-  cancelBtn.textContent = 'Cancel';
-  hideErrorSummary();
-  showProcessingDialog();
-  startWaitingText();
-  overlayProgressFill.style.width = '0%';
-  overlayProgressText.textContent = 'Starting...';
-  overlayFiles.innerHTML = '';
-  progressWrap.classList.add('visible');
-  setProgress(0);
-  progressText.textContent = 'Starting processing.';
+  prepareProcessing('Starting...', 'Starting processing.');
 
   sessionFiles.forEach(f => { if (f.state === 'uploaded') f.state = 'queued'; });
   renderFileList();
@@ -1052,6 +1038,24 @@ async function startProcessing() {
   pollStatus();
 }
 
+function prepareProcessing(overlayMessage, progressMessage) {
+  processBtn.disabled = true;
+  downloadBtn.classList.add('hidden');
+  retryBtn.classList.add('hidden');
+  resetBtn.classList.add('hidden');
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = 'Cancel';
+  hideErrorSummary();
+  showProcessingDialog();
+  startWaitingText();
+  overlayProgressFill.style.width = '0%';
+  overlayProgressText.textContent = overlayMessage;
+  overlayFiles.innerHTML = '';
+  progressWrap.classList.add('visible');
+  setProgress(0);
+  progressText.textContent = progressMessage;
+}
+
 retryBtn.addEventListener('click', () => startRetry());
 
 cancelBtn.addEventListener('click', () => cancelProcessing());
@@ -1066,21 +1070,7 @@ async function cancelProcessing() {
 async function startRetry() {
   if (!sessionId) return;
 
-  processBtn.disabled = true;
-  downloadBtn.classList.add('hidden');
-  retryBtn.classList.add('hidden');
-  resetBtn.classList.add('hidden');
-  cancelBtn.disabled = false;
-  cancelBtn.textContent = 'Cancel';
-  hideErrorSummary();
-  showProcessingDialog();
-  startWaitingText();
-  overlayProgressFill.style.width = '0%';
-  overlayProgressText.textContent = 'Retrying failed files...';
-  overlayFiles.innerHTML = '';
-  progressWrap.classList.add('visible');
-  setProgress(0);
-  progressText.textContent = 'Retrying failed files...';
+  prepareProcessing('Retrying failed files...', 'Retrying failed files...');
 
   const res = await fetch(`/api/v1/jobs/${sessionId}/retry`, { method: 'POST' });
   if (!res.ok) {

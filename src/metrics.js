@@ -59,12 +59,13 @@ class Metrics {
     for (const [key, vals] of this._timings) {
       if (vals.length === 0) continue;
       const sorted = [...vals].sort((a, b) => a - b);
+      const sum = vals.reduce((total, value) => total + value, 0);
       timings[key] = {
         count: vals.length,
-        sum: vals.reduce((a, b) => a + b, 0),
+        sum,
         min: sorted[0],
         max: sorted[sorted.length - 1],
-        avg: Math.round(vals.reduce((a, b) => a + b, 0) / vals.length),
+        avg: Math.round(sum / vals.length),
         p50: percentile(sorted, 0.5),
         p95: percentile(sorted, 0.95),
         p99: percentile(sorted, 0.99)

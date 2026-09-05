@@ -13,7 +13,8 @@ const MAX_VIDEO_AXIS = 4096;
 const MAX_VIDEO_PIXELS = 16 * 1024 * 1024;
 
 function isVideoFile(filename) {
-  return VIDEO_EXTENSIONS.some(ext => filename.toLowerCase().endsWith(ext));
+  const lowerName = filename.toLowerCase();
+  return VIDEO_EXTENSIONS.some(ext => lowerName.endsWith(ext));
 }
 
 function createTimeoutGuard(proc, commandName, timeoutMs, reject) {

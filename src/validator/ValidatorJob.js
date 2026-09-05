@@ -86,12 +86,30 @@ export class ValidatorJob {
   }
 
   get progress() {
-    const completedFiles = this.files.filter(f => ['pass', 'warning', 'fail', 'error'].includes(f.status));
+    let completed = 0;
+    let failed = 0;
+    let warnings = 0;
+    for (const file of this.files) {
+      switch (file.status) {
+        case 'warning':
+          warnings++;
+          completed++;
+          break;
+        case 'fail':
+        case 'error':
+          failed++;
+          completed++;
+          break;
+        case 'pass':
+          completed++;
+          break;
+      }
+    }
     return {
       total: this.files.length,
-      completed: completedFiles.length,
-      failed: this.files.filter(f => ['fail', 'error'].includes(f.status)).length,
-      warnings: this.files.filter(f => f.status === 'warning').length
+      completed,
+      failed,
+      warnings
     };
   }
 

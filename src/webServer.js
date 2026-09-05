@@ -138,10 +138,6 @@ function newId() {
   return crypto.randomUUID().slice(0, 8);
 }
 
-async function rmdir(dir) {
-  return storage.rmdir(dir);
-}
-
 function isSafeFilename(name) {
   return !name.includes('..') && !name.includes('/') && !name.includes('\\');
 }
@@ -150,10 +146,6 @@ function createFileId(fileName, index) {
   const parsed = path.parse(fileName);
   const safeBase = sanitizeFileName(parsed.name) || 'file';
   return `${String(index + 1).padStart(3, '0')}-${safeBase}`;
-}
-
-function createValidatorFileId(fileName, index) {
-  return createFileId(fileName, index);
 }
 
 function validatorWorkRoot() {
@@ -170,25 +162,20 @@ function validatorFileType(fileName) {
   return 'zip';
 }
 
-function isTerminalValidatorStatus(status) {
-  return status === 'complete' || status === 'error';
-}
-
-function validatorCleanupAge(job) {
-  return new Date(job.updatedAt || job.createdAt).getTime();
-}
-
-function isStaleTerminalValidatorJob(job, now = Date.now()) {
-  return isTerminalValidatorStatus(job.status) && now - validatorCleanupAge(job) > SESSION_TTL_MS;
-}
-
 function isStaleValidatorJob(job, now = Date.now()) {
-  if (isStaleTerminalValidatorJob(job, now)) return true;
-  return ['uploaded', 'validating'].includes(job.status) && now - validatorCleanupAge(job) > PROCESSING_TTL_MS;
+  const age = now - new Date(job.updatedAt || job.createdAt).getTime();
+  if (job.status === 'complete' || job.status === 'error') return age > SESSION_TTL_MS;
+  return (job.status === 'uploaded' || job.status === 'validating') && age > PROCESSING_TTL_MS;
 }
 
 function getFileWorkDir(job, file) {
   return storage.fileWorkDir(job.id, file.id);
+}
+
+function removeFiles(files) {
+  return Promise.all(files.map(file =>
+    file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()
+  ));
 }
 
 function friendlyFileError(fileName, rawMessage) {
@@ -238,17 +225,9 @@ function errorBody(message, code) {
 // Auth helpers
 // ---------------------------------------------------------------------------
 
-function assertOwnership(job, auth, res) {
+function assertOwnership(job, auth, res, entity = 'Job') {
   if (!job || !job.isOwnedBy(auth)) {
-    res.status(404).json(errorBody('Job not found', 'NOT_FOUND'));
-    return false;
-  }
-  return true;
-}
-
-function assertValidatorOwnership(job, auth, res) {
-  if (!job || !job.isOwnedBy(auth)) {
-    res.status(404).json(errorBody('Validator job not found', 'NOT_FOUND'));
+    res.status(404).json(errorBody(`${entity} not found`, 'NOT_FOUND'));
     return false;
   }
   return true;
@@ -335,9 +314,9 @@ async function cleanupValidatorJob(job) {
     if (!currentJob || !isStaleValidatorJob(currentJob)) return;
 
     await Promise.all([
-      ...currentJob.files.map(file => file.path ? fs.remove(file.path).catch(() => {}) : Promise.resolve()),
+      removeFiles(currentJob.files),
       storage.cleanupJob(currentJob.id),
-      rmdir(validatorJobWorkRoot(currentJob.id))
+      storage.rmdir(validatorJobWorkRoot(currentJob.id))
     ]);
 
     const deletableJob = await validatorStore.get(currentJob.id);
@@ -534,7 +513,7 @@ async function processJob(jobId, admissionLease = null) {
       } finally {
         globalCap.release();
         if (!keepDir) {
-          await rmdir(fileWorkDir);
+          await storage.rmdir(fileWorkDir);
         }
       }
     });
@@ -739,7 +718,7 @@ async function handleUpload(req, res) {
   }
 
   if (allFiles.length > MAX_UPLOAD_FILES) {
-    await Promise.all(allFiles.map(f => fs.remove(f.path).catch(() => {})));
+    await removeFiles(allFiles);
     return res.status(400).json(errorBody(
       `Batch ZIP expansion resulted in ${allFiles.length} files (max ${MAX_UPLOAD_FILES})`,
       'TOO_MANY_FILES'
@@ -780,7 +759,7 @@ async function handleAppendFiles(req, res) {
   const log = logger.child({ module: 'handleAppendFiles', jobId: req.params.jobId, userId: auth.userId, tenantId: auth.tenantId, clientId: auth.clientId });
 
   if (!assertOwnership(job, auth, res)) {
-    await Promise.all(files.map(f => fs.remove(f.path).catch(() => {})));
+    await removeFiles(files);
     return;
   }
 
@@ -791,7 +770,7 @@ async function handleAppendFiles(req, res) {
   }
 
   if (job.status !== 'uploaded') {
-    await Promise.all(files.map(f => fs.remove(f.path).catch(() => {})));
+    await removeFiles(files);
     log.warn('Append rejected — job already started', { status: job.status });
     metrics.increment('upload.rejected', { reason: 'job_already_started' });
     return res.status(409).json(errorBody('Cannot add files after processing has started', 'JOB_ALREADY_STARTED'));
@@ -812,7 +791,7 @@ async function handleAppendFiles(req, res) {
 
   const combinedCount = job.files.length + allFiles.length;
   if (combinedCount > MAX_UPLOAD_FILES) {
-    await Promise.all(allFiles.map(f => fs.remove(f.path).catch(() => {})));
+    await removeFiles(allFiles);
     return res.status(400).json(errorBody(
       `Adding ${allFiles.length} file(s) would exceed the max of ${MAX_UPLOAD_FILES} files per job`,
       'TOO_MANY_FILES'
@@ -862,7 +841,7 @@ async function handleValidatorUpload(req, res) {
   }
 
   if (allFiles.length > MAX_UPLOAD_FILES) {
-    await Promise.all(allFiles.map(f => fs.remove(f.path).catch(() => {})));
+    await removeFiles(allFiles);
     return res.status(400).json(errorBody(
       `Batch ZIP expansion resulted in ${allFiles.length} files (max ${MAX_UPLOAD_FILES})`,
       'TOO_MANY_FILES'
@@ -870,7 +849,7 @@ async function handleValidatorUpload(req, res) {
   }
 
   const fileReports = allFiles.map((file, index) => new ValidatorFileReport({
-    fileId: createValidatorFileId(file.originalname, index),
+    fileId: createFileId(file.originalname, index),
     fileName: file.originalname,
     fileType: validatorFileType(file.originalname),
     path: file.path,
@@ -900,7 +879,7 @@ async function handleValidatorStart(req, res) {
   const auth = req.auth || {};
   const presetId = req.body?.preset || 'generic';
 
-  if (!assertValidatorOwnership(job, auth, res)) return;
+  if (!assertOwnership(job, auth, res, 'Validator job')) return;
 
   try {
     getPreset(presetId);
@@ -984,7 +963,7 @@ async function handleValidatorStart(req, res) {
 
 async function handleValidatorGet(req, res) {
   const job = await validatorStore.get(req.params.jobId);
-  if (!assertValidatorOwnership(job, req.auth, res)) return;
+  if (!assertOwnership(job, req.auth, res, 'Validator job')) return;
 
   res.json(job.toJSON());
 }
