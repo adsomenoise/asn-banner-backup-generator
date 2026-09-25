@@ -64,6 +64,7 @@ const fileInput = document.getElementById('fileInput');
 const fileList = document.getElementById('fileList');
 const processBtn = document.getElementById('processBtn');
 const downloadBtn = document.getElementById('downloadBtn');
+const includeOriginals = document.getElementById('includeOriginals');
 const retryBtn = document.getElementById('retryBtn');
 const resetBtn = document.getElementById('resetBtn');
 const progressWrap = document.getElementById('progressWrap');
@@ -1239,6 +1240,16 @@ async function pollStatus() {
 
 downloadBtn.addEventListener('click', startDownload);
 
+function filenameFromDisposition(header) {
+  if (!header) return null;
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded) {
+    try { return decodeURIComponent(encoded[1]); } catch { /* fall through */ }
+  }
+  const plain = header.match(/filename="([^"]+)"/i);
+  return plain ? plain[1] : null;
+}
+
 async function startDownload() {
   if (!sessionId) return;
 
@@ -1246,7 +1257,9 @@ async function startDownload() {
   downloadBtn.textContent = 'Downloading...';
 
   try {
-    const res = await fetch(`/api/v1/jobs/${sessionId}/download`);
+    const withOriginals = includeOriginals.checked;
+    const query = withOriginals ? '?include=originals' : '';
+    const res = await fetch(`/api/v1/jobs/${sessionId}/download${query}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Download failed' }));
       showToast(err.error || 'Download failed', 'error');
@@ -1259,7 +1272,8 @@ async function startDownload() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `backup-images-${sessionId}.zip`;
+    // The server names the delivery (<YYMMDDHHmm>_delivery_<common name>.zip).
+    a.download = filenameFromDisposition(res.headers.get('Content-Disposition')) || `delivery-${sessionId}.zip`;
     document.body.appendChild(a);
     a.click();
     a.remove();

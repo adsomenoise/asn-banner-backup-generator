@@ -55,6 +55,12 @@ describe('LocalStorage', () => {
       assert.ok(p.endsWith('.zip'));
     });
 
+    it('bundleZipPath is a separate zip under results', () => {
+      const p = storage.bundleZipPath('job-abc');
+      assert.ok(p.endsWith(path.join('results', 'job-abc-with-originals.zip')));
+      assert.notStrictEqual(p, storage.outputZipPath('job-abc'));
+    });
+
     it('different jobs produce different paths', () => {
       assert.notStrictEqual(storage.uploadDir('a'), storage.uploadDir('b'));
       assert.notStrictEqual(storage.workDir('a'), storage.workDir('b'));
@@ -128,6 +134,14 @@ describe('LocalStorage', () => {
       assert.strictEqual(await fs.pathExists(storage.uploadDir(jobId)), false);
       assert.strictEqual(await fs.pathExists(storage.resultDir(jobId)), false);
       assert.strictEqual(await fs.pathExists(workDir), false);
+    });
+
+    it('removes the bundle-with-originals zip', async () => {
+      const jobId = 'cleanup-bundle';
+      await fs.ensureDir(path.dirname(storage.bundleZipPath(jobId)));
+      await fs.writeFile(storage.bundleZipPath(jobId), 'zip');
+      await storage.cleanupJob(jobId);
+      assert.strictEqual(await fs.pathExists(storage.bundleZipPath(jobId)), false);
     });
 
     it('does not throw on non-existent job', async () => {

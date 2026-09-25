@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'fs-extra';
 import path from 'path';
 import AdmZip from 'adm-zip';
-import { extractZip, isPathSafe, isContainerZip, expandContainerZip } from '../src/extractZip.js';
+import { extractZip, isPathSafe, isContainerZip, expandContainerZip, findRivePackageEntry } from '../src/extractZip.js';
 
 const TEST_TEMP = path.resolve('test-temp-extract');
 
@@ -231,6 +231,63 @@ describe('isContainerZip', () => {
 
     assert.strictEqual(isContainerZip(txtPath), false);
     await fs.remove(txtPath);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findRivePackageEntry
+// ---------------------------------------------------------------------------
+
+describe('findRivePackageEntry', () => {
+  const RIV = Buffer.concat([Buffer.from('RIVE'), Buffer.from('payload')]);
+
+  async function zipOf(name, entries) {
+    const zip = new AdmZip();
+    for (const [entryName, data] of Object.entries(entries)) zip.addFile(entryName, Buffer.from(data));
+    const zipPath = path.join(TEST_TEMP, name);
+    await fs.writeFile(zipPath, zip.toBuffer());
+    return zipPath;
+  }
+
+  it('returns the .riv entry for one .riv plus assets and no HTML', async () => {
+    const p = await zipOf('rive-pkg.zip', { 'hero_300x250.riv': RIV, 'logo.png': 'png', 'fonts/a.ttf': 'ttf' });
+    assert.strictEqual(findRivePackageEntry(p), 'hero_300x250.riv');
+  });
+
+  it('finds a .riv inside a folder', async () => {
+    const p = await zipOf('rive-pkg-dir.zip', { 'campaign/hero_300x250.riv': RIV, 'campaign/logo.png': 'png' });
+    assert.strictEqual(findRivePackageEntry(p), 'campaign/hero_300x250.riv');
+  });
+
+  it('ignores __MACOSX metadata when counting .riv files', async () => {
+    const p = await zipOf('rive-pkg-mac.zip', { 'hero_300x250.riv': RIV, '__MACOSX/._hero_300x250.riv': 'meta' });
+    assert.strictEqual(findRivePackageEntry(p), 'hero_300x250.riv');
+  });
+
+  it('returns null when the ZIP has an HTML entry point', async () => {
+    const p = await zipOf('rive-html.zip', { 'hero_300x250.riv': RIV, 'index.html': '<html></html>' });
+    assert.strictEqual(findRivePackageEntry(p), null);
+  });
+
+  it('returns null for several .riv files (batch)', async () => {
+    const p = await zipOf('rive-batch.zip', { 'a_300x250.riv': RIV, 'b_728x90.riv': RIV, 'logo.png': 'png' });
+    assert.strictEqual(findRivePackageEntry(p), null);
+  });
+
+  it('returns null when the .riv sits next to other creatives (batch)', async () => {
+    const p = await zipOf('rive-mixed.zip', { 'a_300x250.riv': RIV, 'b_728x90.zip': validInnerZipBuffer() });
+    assert.strictEqual(findRivePackageEntry(p), null);
+  });
+
+  it('returns null when the .riv has no Rive signature', async () => {
+    const p = await zipOf('rive-fake.zip', { 'hero_300x250.riv': 'not rive', 'logo.png': 'png' });
+    assert.strictEqual(findRivePackageEntry(p), null);
+  });
+
+  it('returns null for a non-ZIP path', async () => {
+    const p = path.join(TEST_TEMP, 'rive-notazip.zip');
+    await fs.writeFile(p, 'nope');
+    assert.strictEqual(findRivePackageEntry(p), null);
   });
 });
 

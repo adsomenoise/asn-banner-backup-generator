@@ -39,6 +39,10 @@ export class LocalStorage {
     return path.join(this._results, `${jobId}.zip`);
   }
 
+  bundleZipPath(jobId) {
+    return path.join(this._results, `${jobId}-with-originals.zip`);
+  }
+
   // -----------------------------------------------------------------------
   // Directory lifecycle
   // -----------------------------------------------------------------------
@@ -64,7 +68,8 @@ export class LocalStorage {
       this.rmdir(this.uploadDir(jobId)),
       this.rmdir(this.workDir(jobId)),
       this.rmdir(this.resultDir(jobId)),
-      this.rmdir(this.outputZipPath(jobId))
+      this.rmdir(this.outputZipPath(jobId)),
+      this.rmdir(this.bundleZipPath(jobId))
     ]);
   }
 

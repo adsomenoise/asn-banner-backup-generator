@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Download ZIPs are named `<YYMMDDHHmm>_delivery_<common filename prefix>.zip` (e.g. `2609251516_delivery_tel-cons-ns-bingefoot-platforms-w3-display.zip`). Time zone configurable via `DELIVERY_TIMEZONE` (default `Europe/Brussels`). Was: `backup-images-{jobId}.zip`
+- Rive package ZIPs: a ZIP holding one `.riv` plus assets (no HTML) is processed as one Rive creative. The `.riv` becomes `<name>.js`, `<name>.html` is generated next to it, and the other files are kept in `<name>.zip`. Previously it was expanded as a batch and the assets were dropped.
+- Option to download the original creatives together with the backup images in one ZIP: "Also include the original creatives" checkbox in the UI, `GET /api/v1/jobs/{jobId}/download?include=originals` in the API (originals sit next to the backup images at the ZIP root)
 - Asset path validation (`src/checkAssetPaths.js`): scans HTML direct refs, linked CSS (`url()`, `@import`), and linked JS string literals (including cache-busting query strings) for missing files; reports non-fatal warnings in `FileInfo.warnings[]` without failing the job
 - Container ZIP expansion in the validator upload flow — batch ZIPs are now expanded into individual files before validation, consistent with the backup generator flow
 - `FileInfo.warnings[]` field on `FileInfo` model; warnings are surfaced in the frontend per-file list

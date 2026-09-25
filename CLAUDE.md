@@ -48,12 +48,14 @@ GET /api/v1/jobs/:id/download → res.download → cleanupJob
 | `src/webServer.js` | Express server, all routes, Multer, job lifecycle (1113 lines — the monolith) |
 | `src/captureBackup.js` | 4-strategy Playwright screenshot + Sharp JPEG compression |
 | `src/browserPool.js` | Singleton Chromium pool (reuses browsers, fresh context per capture) |
-| `src/extractZip.js` | ZIP extraction with path-traversal + size limits; `isContainerZip` / `expandContainerZip` for batch ZIPs |
+| `src/extractZip.js` | ZIP extraction with path-traversal + size limits; `isContainerZip` / `expandContainerZip` for batch ZIPs; `findRivePackageEntry` for a ZIP of one `.riv` + assets (kept as a single `.riv` creative) |
 | `src/checkAssetPaths.js` | Checks banner assets exist: HTML refs (`src`, `<link href>`, `srcset`, inline `url()`), then opens linked CSS files for `url()`/`@import`, and linked JS files for string-literal asset paths (covers cache-busting query strings). Non-blocking — reports missing files as `FileInfo.warnings`. |
 | `src/findBannerEntry.js` | Recursive HTML file discovery, prefers shallowest |
 | `src/detectBannerSize.js` | meta tag → canvas → div → filename → 300×250 |
 | `src/localServer.js` | Job-scoped static file server for Playwright |
 | `src/riveTemplate.js` | Generates wrapper HTML for `.riv` files |
+| `src/jobs/deliveryName.js` | Download ZIP name: `<YYMMDDHHmm>_delivery_<common filename prefix>.zip`, built server-side (the frontend uses `Content-Disposition`) |
+| `src/jobs/bundleOriginals.js` | `buildRivePackage` (the single source for the `<name>.zip` = `<name>.js` + `<name>.html` layout, used by capture and both downloads) and `buildBundleWithOriginals` (`?include=originals` download) |
 | `src/auth/middleware.js` | Auth factory: DevAuthAdapter vs HeaderAuthAdapter |
 | `src/jobs/Job.js` | Job + FileInfo models with state machines; `FileInfo.warnings[]` surfaces non-fatal issues (e.g. missing assets) to the UI |
 | `src/jobs/JobStore.js` | JobStore interface + InMemoryJobStore |
@@ -156,6 +158,7 @@ See `.env.example` for full list. Key vars:
 | `AUTH_MODE` | `development` | `production` requires proxy-injected auth headers |
 | `CAPTURE_CONCURRENCY` | `3` | Max concurrent Playwright captures (1–8) |
 | `RIVE_DEBUG_DIR` | _(unset)_ | Set to save debug HTML/errors on failed captures |
+| `DELIVERY_TIMEZONE` | `Europe/Brussels` | Time zone for the `YYMMDDHHmm` stamp in delivery ZIP names; invalid values fall back to the default |
 | `ADMIN_PASSWORD` | _(required in prod)_ | Password for the built-in login UI |
 | `CORS_ORIGIN` | `*` | Restrict in production |
 

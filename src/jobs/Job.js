@@ -9,6 +9,8 @@ export class FileInfo {
     this.inputIndex = Number.isInteger(props.inputIndex) ? props.inputIndex : null;
     this.name = props.name || '';
     this.path = props.path || null;
+    // Set for a Rive package upload: `path` is the ZIP, this is the .riv inside it.
+    this.packageEntry = props.packageEntry || null;
     this.type = props.type || 'zip';
     this.size = props.size || 0;
     this.state = props.state || 'uploaded';

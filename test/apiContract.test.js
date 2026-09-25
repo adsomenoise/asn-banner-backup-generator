@@ -194,6 +194,19 @@ describe('API Contract — v1 endpoints', () => {
       // 1 inner ZIP from batch + 1 regular ZIP = 2 total
       assert.strictEqual(body.files.length, 2);
     });
+
+    it('keeps a ZIP with one .riv plus assets as a single .riv creative named after the .riv', async () => {
+      const pkg = new AdmZip();
+      pkg.addFile('hero_300x250.riv', Buffer.concat([Buffer.from('RIVE'), Buffer.from('payload')]));
+      pkg.addFile('logo.png', Buffer.from('png'));
+      const { status, body } = await uploadFiles([
+        { name: 'campaign.zip', content: pkg.toBuffer() }
+      ]);
+      assert.strictEqual(status, 201);
+      assert.strictEqual(body.files.length, 1);
+      assert.strictEqual(body.files[0].fileName, 'hero_300x250.riv');
+      assert.strictEqual(body.files[0].fileType, 'riv');
+    });
   });
 
   // -----------------------------------------------------------------------

@@ -193,6 +193,10 @@ The default is `3`. Invalid values fall back to `3`; values above `8` are capped
    - **Start over** resets everything.
 6. Click **Download ZIP** to get a single archive containing: JPGs for successful files, nested per-creative ZIPs (`.html` + `.js`) for `.riv` files, and `errors.json` if any file failed.
 
+**Rive packaging.** A `.riv` creative is delivered as `<name>.zip` containing `<name>.js` (the Rive file, renamed) and a generated `<name>.html` wrapper, where `<name>` is the `.riv` filename. The backup image is captured from that same package.
+
+**Rive package ZIPs.** A ZIP that holds exactly one `.riv` plus other files (images, fonts, …), with no HTML and no other ZIPs or videos, is treated as one Rive creative rather than a batch. It appears in the file list under the `.riv` name, and its `<name>.zip` keeps all the other files, with `<name>.js` and `<name>.html` placed where the `.riv` was. A single wrapper folder around everything is flattened so the HTML ends up at the ZIP root. A ZIP with several `.riv` files, or `.riv` files alongside other ZIPs or videos, is still expanded as a batch. (The Ad Validator still expands such ZIPs as a batch.)
+
 ### Ad Validator
 
 The web UI includes a separate **Validate Ads** mode. It accepts `.zip`, `.riv`, and supported video files, runs a selected validation preset, and renders a report without generating backup JPGs.
@@ -444,11 +448,17 @@ Get only the per-file detail array (lighter than the full job response).
 
 Download the result ZIP archive. Each successful file's JPG is included. Failed files are excluded. If any file failed, an `errors.json` manifest is included.
 
+The file is named `<YYMMDDHHmm>_delivery_<common name>.zip` (sent in `Content-Disposition`). The timestamp is the download time in `DELIVERY_TIMEZONE` (default `Europe/Brussels`). The common name is the longest shared start of all uploaded filenames (extensions dropped), cut back to a whole `-`/`_` segment, with trailing separators removed. For example, `tel-cons-ns-bingefoot-platforms-w3-display-970x250-nl.zip` and `…-300x250-nl.zip` downloaded on 2026-09-25 at 15:16 give `2609251516_delivery_tel-cons-ns-bingefoot-platforms-w3-display.zip`. If the filenames share nothing, the name is `<YYMMDDHHmm>_delivery.zip`; a single upload uses its full name. The same name is used with `include=originals`.
+
+**Query parameters**
+- `include=originals` (optional) — also bundle every originally uploaded creative next to the backup images at the root of the ZIP, including files that failed. ZIPs and videos are added as uploaded. A `.riv` (or Rive package ZIP) is added as its `<name>.zip` package (`<name>.js` + `<name>.html`, plus the package's assets), the same package the backup ZIP already contains for successfully processed `.riv` files, so it is never duplicated and the raw `.riv` is never included. A `.riv` without `WxH` dimensions in its filename cannot be packaged and is skipped. Filenames that clash with a backup entry or another upload get a ` (2)`, ` (3)`… suffix. Creatives uploaded inside a batch ZIP-of-ZIPs appear as their individual inner ZIPs.
+
 **Response `200 OK`** — Binary ZIP download (`Content-Type: application/zip`)
 
 **Error responses**
 - `404` — `NOT_FOUND` (unknown `jobId` or result file missing)
 - `400` — `NOT_COMPLETE` (job is still processing or not yet started)
+- `500` — `BUNDLE_FAILED` (`include=originals` only: originals could not be packaged)
 
 ---
 

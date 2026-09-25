@@ -43,7 +43,7 @@ const IGNORED_PATTERNS = [
   /^__/
 ];
 
-function shouldIgnore(entryName) {
+export function shouldIgnore(entryName) {
   return IGNORED_PATTERNS.some(pattern => {
     if (pattern instanceof RegExp) return pattern.test(entryName);
     return entryName.includes(pattern);
@@ -154,6 +154,31 @@ export function isContainerZip(zipPath) {
     return hasProcessable && !hasHtml;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Returns the entry name of the .riv inside a "Rive package" ZIP, or null.
+ * A Rive package is a single Rive creative shipped with its assets: no HTML
+ * entry point, exactly one .riv (with a valid Rive signature), and no other
+ * individually-processable files (ZIPs, videos). Such a ZIP is processed as
+ * one .riv creative that keeps its other files, instead of being expanded
+ * as a batch container (which would drop them).
+ */
+export function findRivePackageEntry(zipPath) {
+  try {
+    const zip = new AdmZip(zipPath);
+    const entries = zip.getEntries().filter(e => !e.isDirectory && !shouldIgnore(e.entryName));
+    if (entries.some(e => /\.html?$/i.test(e.entryName))) return null;
+
+    const processable = entries.filter(e => PROCESSABLE_RE.test(e.entryName));
+    if (processable.length !== 1 || !/\.riv$/i.test(processable[0].entryName)) return null;
+
+    const data = processable[0].getData();
+    if (data.length < 4 || !data.slice(0, 4).equals(RIV_MAGIC)) return null;
+    return processable[0].entryName;
+  } catch {
+    return null;
   }
 }
 

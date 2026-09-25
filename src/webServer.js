@@ -5,7 +5,9 @@ import fs from 'fs-extra';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import AdmZip from 'adm-zip';
-import { extractZip, isContainerZip, expandContainerZip } from './extractZip.js';
+import { extractZip, isContainerZip, expandContainerZip, findRivePackageEntry } from './extractZip.js';
+import { buildBundleWithOriginals, buildRivePackage } from './jobs/bundleOriginals.js';
+import { deliveryZipName, getDeliveryTimeZone } from './jobs/deliveryName.js';
 import { checkAssetPaths } from './checkAssetPaths.js';
 import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
@@ -16,7 +18,7 @@ import { createServer as startFileServer, closeServer as stopFileServer } from '
 import { logger } from './logger.js';
 import { metrics } from './metrics.js';
 import { getUniqueOutputPath, sanitizeFileName } from './utils.js';
-import { parseRivDimensions, generateRiveHTML } from './riveTemplate.js';
+import { parseRivDimensions } from './riveTemplate.js';
 import { createAuthMiddleware } from './auth/middleware.js';
 import { createSessionToken, SESSION_COOKIE, SESSION_TTL_MS as AUTH_SESSION_TTL_MS } from './auth/adapter.js';
 import { Job, FileInfo } from './jobs/Job.js';
@@ -404,15 +406,14 @@ async function processJob(jobId, admissionLease = null) {
             throw new Error(`Could not parse dimensions from filename: ${file.name}`);
           }
 
-          const creativeDir = path.join(fileWorkDir, 'rive');
-          await fs.ensureDir(creativeDir);
-
-          const jsFile = path.join(creativeDir, `${sanitized}.js`);
-          await fs.copyFile(file.path, jsFile);
-
-          const htmlContent = generateRiveHTML(`${sanitized}.js`, dims.width, dims.height);
-          const htmlFile = path.join(creativeDir, `${sanitized}.html`);
-          await fs.writeFile(htmlFile, htmlContent);
+          // Capture exactly what gets delivered: the <name>.zip package (.js + .html,
+          // plus assets for a Rive package upload), extracted with the usual ZIP limits.
+          const pkg = buildRivePackage(file);
+          const pkgZip = path.join(fileWorkDir, `${pkg.name}.zip`);
+          await fs.ensureDir(fileWorkDir);
+          await fs.writeFile(pkgZip, pkg.buffer);
+          const creativeDir = await extractZip(pkgZip, fileWorkDir, { extractName: 'rive' });
+          const htmlFile = path.join(creativeDir, pkg.htmlEntry);
 
           const url = storage.toPublicUrl(port, htmlFile, serveDir);
 
@@ -536,17 +537,10 @@ async function processJob(jobId, admissionLease = null) {
     const zip = new AdmZip();
 
     for (const result of job.results) {
-      if (result.type === 'riv' && result.creativeDir) {
-        const nestedZipPath = path.join(job.resultDir, `${result.name}.zip`);
-        const nestedZip = new AdmZip();
-        const creativeFiles = await fs.readdir(result.creativeDir).catch(() => []);
-        for (const f of creativeFiles) {
-          if (f.endsWith('.html') || f.endsWith('.js')) {
-            nestedZip.addLocalFile(path.join(result.creativeDir, f));
-          }
-        }
-        nestedZip.writeZip(nestedZipPath);
-        zip.addLocalFile(nestedZipPath, '', `${result.name}.zip`);
+      if (result.type === 'riv') {
+        const file = job.files.find(f => f.id === result.fileId);
+        const pkg = file?.path && await fs.pathExists(file.path) ? buildRivePackage(file) : null;
+        if (pkg) zip.addFile(`${pkg.name}.zip`, pkg.buffer);
       }
 
       const jpgPath = result.outputPath || path.join(job.resultDir, `${result.name}.jpg`);
@@ -630,7 +624,9 @@ class UploadValidationError extends Error {
 // Magic-byte validation + container-ZIP expansion, shared between creating a job
 // and appending files to an existing one. Throws UploadValidationError on a bad
 // magic byte; does not enforce a max-file-count (callers know the right threshold).
-async function validateAndExpandUpload(files, log) {
+// With `rivePackages`, a ZIP holding one .riv plus assets stays a single .riv
+// creative (see findRivePackageEntry) instead of being expanded as a batch.
+async function validateAndExpandUpload(files, log, { rivePackages = false } = {}) {
   const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
   const RIV_MAGIC = Buffer.from([0x52, 0x49, 0x56, 0x45]); // "RIVE"
   for (const f of files) {
@@ -655,6 +651,13 @@ async function validateAndExpandUpload(files, log) {
   // Each inner ZIP is magic-byte validated inside expandContainerZip before being written.
   const allFiles = [];
   for (const f of files) {
+    const rivEntry = rivePackages && /\.zip$/i.test(f.originalname) ? findRivePackageEntry(f.path) : null;
+    if (rivEntry) {
+      log.info('Rive package ZIP', { fileName: f.originalname, rivEntry });
+      metrics.increment('upload.rive_package');
+      allFiles.push({ originalname: path.basename(rivEntry), path: f.path, size: f.size, packageEntry: rivEntry });
+      continue;
+    }
     if (/\.zip$/i.test(f.originalname) && isContainerZip(f.path)) {
       const inner = await expandContainerZip(f.path, path.dirname(f.path), { maxInner: MAX_UPLOAD_FILES });
       if (inner.length > 0) {
@@ -686,6 +689,7 @@ function buildFileInfos(allFiles, startIndex) {
     inputIndex: startIndex + i,
     name: f.originalname,
     path: f.path,
+    packageEntry: f.packageEntry || null,
     type: /\.riv$/i.test(f.originalname) ? 'riv' : isVideoFile(f.originalname) ? 'video' : 'zip',
     size: f.size || 0,
     state: 'uploaded'
@@ -706,7 +710,7 @@ async function handleUpload(req, res) {
 
   let allFiles;
   try {
-    allFiles = await admitUploadWork(auth, () => validateAndExpandUpload(files, log));
+    allFiles = await admitUploadWork(auth, () => validateAndExpandUpload(files, log, { rivePackages: true }));
   } catch (err) {
     if (err instanceof AdmissionRejectedError) {
       return res.status(429).json(errorBody(err.message, err.code));
@@ -778,7 +782,7 @@ async function handleAppendFiles(req, res) {
 
   let allFiles;
   try {
-    allFiles = await admitUploadWork(auth, () => validateAndExpandUpload(files, log));
+    allFiles = await admitUploadWork(auth, () => validateAndExpandUpload(files, log, { rivePackages: true }));
   } catch (err) {
     if (err instanceof AdmissionRejectedError) {
       return res.status(429).json(errorBody(err.message, err.code));
@@ -1124,10 +1128,28 @@ async function handleDownload(req, res) {
     return res.status(404).json(errorBody('Result file not found', 'RESULT_NOT_FOUND'));
   }
 
-  metrics.increment('download.started');
-  log.info('Download started');
+  const includeOriginals = req.query.include === 'originals';
+  let downloadPath = zipPath;
+  const downloadName = deliveryZipName(job.files.map(f => f.name), { timeZone: getDeliveryTimeZone() });
 
-  res.download(zipPath, `backup-images-${job.id}.zip`, async (err) => {
+  if (includeOriginals) {
+    downloadPath = storage.bundleZipPath(job.id);
+    try {
+      // Rebuilt on every request: cheap relative to capture, and avoids serving
+      // a stale bundle after a retry changed the backup ZIP.
+      const { added, missing } = await buildBundleWithOriginals(zipPath, job, downloadPath);
+      if (missing.length > 0) log.warn('Some originals missing from bundle', { missing });
+      log.info('Built bundle with originals', { added });
+    } catch (err) {
+      log.error('Failed to build bundle with originals', { error: err.message });
+      return res.status(500).json(errorBody('Could not package the original creatives', 'BUNDLE_FAILED'));
+    }
+  }
+
+  metrics.increment('download.started', { includeOriginals });
+  log.info('Download started', { includeOriginals });
+
+  res.download(downloadPath, downloadName, async (err) => {
     const downloadDuration = Date.now() - downloadStart;
     metrics.timing('download.duration', downloadDuration);
     if (err) {
