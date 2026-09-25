@@ -24,7 +24,7 @@ import { createSessionToken, SESSION_COOKIE, SESSION_TTL_MS as AUTH_SESSION_TTL_
 import { Job, FileInfo } from './jobs/Job.js';
 import { InMemoryJobStore } from './jobs/JobStore.js';
 import { LocalStorage } from './storage/LocalStorage.js';
-import { getCaptureConcurrency } from './config.js';
+import { getCaptureConcurrency, getCaptureFastForward } from './config.js';
 import { ValidatorJob, ValidatorFileReport } from './validator/ValidatorJob.js';
 import { ValidatorStore } from './validator/ValidatorStore.js';
 import { getPreset, listPresets } from './validator/presets.js';
@@ -478,6 +478,7 @@ async function processJob(jobId, admissionLease = null) {
           fileLog.info('Capturing ZIP creative', { dimensions: `${dimensions.width}x${dimensions.height}` });
           const result = await captureBackup(url, dimensions, {
             ...captureOpts,
+            fastForward: getCaptureFastForward(),
             debugName: sanitized
           });
           if (signal.aborted) throw new Error('Processing cancelled');

@@ -769,9 +769,20 @@ If an HTML creative contains `<video>` elements, the generator pauses all of the
 
 Standalone uploaded video files already bypass Chromium and use ffmpeg to extract the last frame directly.
 
-### Strategy 6 — Fallback Timeout
+### Strategy 6 — Virtual Time Fast-Forward (HTML5 banner ZIPs)
 
-When no explicit backup hook is available, the app samples low-resolution screenshots of the full rendered viewport every 250 ms. It captures early after the visual has remained unchanged for 2 seconds. The configured creative duration remains a hard deadline, and the final available frame is captured if the page never settles. The default deadline is `15000` ms.
+For HTML5 banner ZIPs without a backup hook, the generator takes over the page's clock and plays the banner's first 30 seconds (the IAB/platform maximum animation length) as fast as the page can run, typically in under a second. An injected script replaces `setTimeout`/`setInterval`, `requestAnimationFrame`, `performance.now` and `Date` before any banner script runs. Time flows normally while the page loads, so the backup contract and network loading still work. The script then advances time **one 60 fps frame at a time**. It also moves CSS animations, transitions and Web Animations forward with each frame. This works for GSAP, Adobe Animate/CreateJS, Motion, anime.js, and plain JS/CSS banners.
+
+- **Frame by frame, not big jumps:** animation libraries cap how far one tick may advance (GSAP's lag smoothing at 500 ms, Motion at about 40 ms, and Animate timelines move one frame per tick). Big time jumps would silently leave them mid-animation.
+- **Downloads during playback:** the clock waits for the network to be quiet before starting, and again after every virtual second in which a request started, so assets a later scene loads still arrive.
+- **Backup contract:** if the banner sets `window.__backupReady` during the fast-forward, capture happens at that exact moment.
+- **Verification:** after 30 s, the frame is compared at three uneven offsets (7, 23 and 61 frames later). If anything still moves (e.g. an endless loop), the page goes back to real time and the fallback below runs unchanged.
+
+Only HTML5 ZIPs use this step (standalone `.riv` files keep their own wrapper path). Set `CAPTURE_FAST_FORWARD=false` to disable it. Not covered by the clock: timers inside Web Workers, `requestIdleCallback`, and `requestVideoFrameCallback`. Banners relying on those show up as "still moving" and use the fallback.
+
+### Strategy 7 — Fallback Timeout
+
+When no explicit backup hook is available and fast-forward did not apply, the app samples low-resolution screenshots of the full rendered viewport every 250 ms. It captures early after the visual has remained unchanged for 2 seconds. The configured creative duration remains a hard deadline, and the final available frame is captured if the page never settles. The default deadline is `15000` ms.
 
 This covers DOM, CSS, canvas, and WebGL motion without changing the creative's `requestAnimationFrame` behavior. HTML and standalone video use the direct last-frame paths above. The explicit backup contract is still faster and more deterministic for other creative types. See [Creative Backup Image Contract](docs/creative-backup-contract.md) for implementation examples.
 

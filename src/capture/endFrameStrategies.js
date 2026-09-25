@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import { delay } from '../utils.js';
+import { fastForwardToEnd, resumeRealTime } from './virtualClock.js';
 
 export const STRATEGIES = {
   QUERY_PARAM: 'Query parameter (?backup=1)',
@@ -7,6 +8,7 @@ export const STRATEGIES = {
   RIVE_STATE: 'Rive end state',
   RIVE_INSTANCE_SCRUB: 'Rive instance scrub',
   HTML_VIDEO_LAST_FRAME: 'HTML video last frame',
+  FAST_FORWARD: 'Virtual time fast-forward',
   FALLBACK_TIMEOUT: 'Fallback timeout'
 };
 
@@ -92,13 +94,15 @@ export async function installRiveStateSignal(page, stateNames) {
 }
 
 export async function resolveEndFrame(page, options) {
-  const { strategy, creativeTimelineStart, captureDeadlineAt, policy, log } = options;
+  const { strategy, creativeTimelineStart, captureDeadlineAt, policy, log, network = null } = options;
   let ready = false;
   let usedStrategy = STRATEGIES.FALLBACK_TIMEOUT;
   let outcome = null;
 
   if (strategy === 'auto' || strategy === 'query') {
-    ready = await checkBackupReady(page, policy.explicitReadyTimeoutMs);
+    // With fast-forward the page's timers run under our clock and the contract
+    // is checked every virtual frame, so there is no need to wait for it here.
+    ready = await checkBackupReady(page, network ? 1 : policy.explicitReadyTimeoutMs);
     if (ready) {
       usedStrategy = STRATEGIES.QUERY_PARAM;
       outcome = 'explicit-ready';
@@ -113,7 +117,7 @@ export async function resolveEndFrame(page, options) {
     }
   }
 
-  if (!ready && strategy === 'auto') {
+  if (!ready && strategy === 'auto' && await hasRiveRuntime(page)) {
     ready = await checkRiveEndState(page, policy.riveStateTimeoutMs);
     if (ready) {
       usedStrategy = STRATEGIES.RIVE_STATE;
@@ -139,6 +143,27 @@ export async function resolveEndFrame(page, options) {
     }
   }
 
+  let fastForward = null;
+  if (!ready && network && (strategy === 'auto' || strategy === 'fast-forward')) {
+    log.step('Fast-forwarding virtual time...');
+    fastForward = await fastForwardToEnd(page, {
+      network,
+      deadlineAt: Math.min(Date.now() + policy.fastForwardTimeoutMs, captureDeadlineAt),
+      policy,
+      sample: sampleViewport,
+      differ: (a, b) => visualSamplesDiffer(a, b, policy.visualPixelDeltaThreshold)
+    });
+    log.step(`Fast-forward: ${fastForward.outcome} after ${fastForward.virtualMs}ms virtual in ${fastForward.duration}ms`);
+    if (fastForward.outcome === 'explicit-ready') {
+      return { strategy: STRATEGIES.QUERY_PARAM, outcome: 'explicit-ready', stability: null, fastForward };
+    }
+    if (fastForward.outcome === 'settled') {
+      return { strategy: STRATEGIES.FAST_FORWARD, outcome: 'fast-forwarded', stability: null, fastForward };
+    }
+    // Still animating (e.g. an endless loop) or unavailable: today's real-time path.
+    await resumeRealTime(page);
+  }
+
   if (!ready) {
     await waitForInitialCanvasContent(page, log);
     const deadlineAt = Math.min(
@@ -154,7 +179,7 @@ export async function resolveEndFrame(page, options) {
     });
     log.step(`Visual stability: ${stability.outcome}, samples: ${stability.samples}, changes: ${stability.changes}`);
     outcome = stability.outcome;
-    return { strategy: STRATEGIES.FALLBACK_TIMEOUT, outcome, stability };
+    return { strategy: STRATEGIES.FALLBACK_TIMEOUT, outcome, stability, fastForward };
   }
 
   return { strategy: usedStrategy, outcome, stability: null };
@@ -252,6 +277,10 @@ async function checkBackupReady(page, timeoutMs = 1000) {
   } catch {
     return false;
   }
+}
+
+async function hasRiveRuntime(page) {
+  return page.evaluate(() => Boolean(window.rive)).catch(() => false);
 }
 
 async function checkRiveEndState(page, timeoutMs = 1000) {

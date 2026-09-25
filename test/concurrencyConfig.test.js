@@ -22,3 +22,14 @@ describe('parseCaptureConcurrency', () => {
     assert.strictEqual(parseCaptureConcurrency('99'), 8);
   });
 });
+
+describe('getCaptureFastForward', () => {
+  it('is on by default and can be switched off', async () => {
+    const { getCaptureFastForward } = await import('../src/config.js');
+    assert.strictEqual(getCaptureFastForward({}), true);
+    assert.strictEqual(getCaptureFastForward({ CAPTURE_FAST_FORWARD: 'true' }), true);
+    for (const off of ['false', '0', 'off', 'no', ' FALSE ']) {
+      assert.strictEqual(getCaptureFastForward({ CAPTURE_FAST_FORWARD: off }), false, off);
+    }
+  });
+});

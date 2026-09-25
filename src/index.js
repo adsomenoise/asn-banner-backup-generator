@@ -7,6 +7,7 @@ import { findBannerEntry } from './findBannerEntry.js';
 import { detectBannerSize } from './detectBannerSize.js';
 import { createServer, closeServer, getServerUrl, getPort } from './localServer.js';
 import { captureBackup } from './captureBackup.js';
+import { getCaptureFastForward } from './config.js';
 import { extensionForFormat } from './capture/outputEncoder.js';
 import { getUniqueOutputPath, sanitizeFileName } from './utils.js';
 
@@ -96,7 +97,8 @@ async function main() {
         quality: options.quality,
         format: options.format,
         maxBytes: options.maxBytes,
-        strategy: options.strategy
+        strategy: options.strategy,
+        fastForward: getCaptureFastForward()
       });
 
       const outputPath = getUniqueOutputPath(

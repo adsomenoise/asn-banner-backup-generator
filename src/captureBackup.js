@@ -2,6 +2,7 @@ import { logger } from './logger.js';
 import { metrics } from './metrics.js';
 import { getBrowserPool } from './browserPool.js';
 import { installRiveStateSignal, resolveEndFrame } from './capture/endFrameStrategies.js';
+import { installVirtualClock, trackNetwork } from './capture/virtualClock.js';
 import { captureScreenshot, saveDebugArtifacts } from './capture/screenshot.js';
 import { encodeScreenshot } from './capture/outputEncoder.js';
 import { remainingBudget, resolveCapturePolicy } from './capture/policy.js';
@@ -20,6 +21,9 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
     debugDir = null,
     debugName = 'capture',
     allowedHosts = [],
+    // Virtual-time fast-forward before the visual-stability fallback. Meant for
+    // HTML5 display banners; off by default (Rive wrappers have their own path).
+    fastForward = false,
     policy: policyOverrides = {}
   } = options;
 
@@ -37,6 +41,7 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
   const { browser } = lease;
   let context = null;
   let page = null;
+  let network = null;
 
   try {
     const proxyUrl = await getPublicEgressProxyUrl();
@@ -53,6 +58,10 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
     await installNetworkPolicy(context, baseUrl, allowedHosts, null, true);
     page = await context.newPage();
     await installRiveStateSignal(page, policy.riveEndStateNames);
+    if (fastForward) {
+      await installVirtualClock(page);
+      network = trackNetwork(page);
+    }
 
     page.on('console', message => {
       if (message.type() === 'error' || message.type() === 'warning') {
@@ -103,8 +112,13 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
       creativeTimelineStart,
       captureDeadlineAt,
       policy,
-      log
+      log,
+      network
     });
+    if (endFrame.fastForward) {
+      metrics.increment('capture.fast_forward', { outcome: endFrame.fastForward.outcome });
+      metrics.timing('capture.fast_forward_duration', endFrame.fastForward.duration);
+    }
     if (endFrame.stability) {
       metrics.increment('capture.visual_stability', { outcome: endFrame.stability.outcome });
       metrics.timing('capture.visual_stability_duration', endFrame.stability.duration);
@@ -143,6 +157,7 @@ export async function captureBackup(baseUrl, dimensions, options = {}) {
       browserErrors
     };
   } finally {
+    network?.dispose();
     if (context) {
       await context.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
       await context.close().catch(() => {});

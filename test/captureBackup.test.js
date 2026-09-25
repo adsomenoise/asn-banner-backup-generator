@@ -350,3 +350,120 @@ describe('visualSamplesDiffer', () => {
     assert.strictEqual(visualSamplesDiffer(Buffer.from([10, 10, 10]), Buffer.from([20, 20, 20])), true);
   });
 });
+
+describe('captureBackup — virtual time fast-forward', () => {
+  async function serve(html, fn) {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(html);
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      return await fn(`http://127.0.0.1:${server.address().port}/creative.html`);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  }
+
+  async function centerColor(buffer) {
+    const { data } = await sharp(buffer).resize(1, 1).raw().toBuffer({ resolveWithObject: true });
+    return { r: data[0], g: data[1], b: data[2] };
+  }
+
+  const box = '<div id="box" style="width:40px;height:40px;background:#f00"></div>';
+
+  it('reaches the end of a timeline with a pause longer than the stability window', async () => {
+    // Scene 1 for 1s, a 3s hold (longer than visualStableForMs), then the end frame.
+    const html = `<!doctype html><body style="margin:0">${box}<script>
+      var el = document.getElementById('box'), start = performance.now();
+      (function tick() {
+        var t = performance.now() - start;
+        el.style.background = t < 4000 ? '#f00' : '#0f0';
+        if (t < 4500) requestAnimationFrame(tick);
+      })();
+    </script></body>`;
+    await serve(html, async url => {
+      const startedAt = Date.now();
+      const result = await captureBackup(url, { width: 40, height: 40 }, { fastForward: true, quality: 95 });
+      const duration = Date.now() - startedAt;
+      assert.strictEqual(result.strategy, 'Virtual time fast-forward');
+      assert.strictEqual(result.outcome, 'fast-forwarded');
+      assert.ok(duration < 4000, `expected capture faster than the 4.5s timeline, took ${duration}ms`);
+      const c = await centerColor(result.buffer);
+      assert.ok(c.g > c.r, `expected green end frame, got rgb(${c.r}, ${c.g}, ${c.b})`);
+    });
+  });
+
+  it('runs setTimeout-chained scenes and CSS animations to their end', async () => {
+    const html = `<!doctype html><style>
+      @keyframes grow { from { width: 0 } to { width: 40px } }
+      #bar { height: 20px; background: #00f; animation: grow 6s linear forwards }
+    </style><body style="margin:0">${box}<div id="bar"></div><script>
+      setTimeout(function () {
+        setTimeout(function () { document.getElementById('box').style.background = '#0f0'; }, 3000);
+      }, 2000);
+    </script></body>`;
+    await serve(html, async url => {
+      const result = await captureBackup(url, { width: 40, height: 60 }, { fastForward: true, quality: 95 });
+      assert.strictEqual(result.strategy, 'Virtual time fast-forward');
+      const top = await sharp(result.buffer).extract({ left: 0, top: 0, width: 40, height: 40 }).resize(1, 1).raw().toBuffer();
+      const bar = await sharp(result.buffer).extract({ left: 30, top: 42, width: 10, height: 16 }).resize(1, 1).raw().toBuffer();
+      assert.ok(top[1] > top[0], 'expected the setTimeout scene to have turned the box green');
+      assert.ok(bar[2] > 200 && bar[0] < 80, 'expected the CSS animation to have finished at full width');
+    });
+  });
+
+  it('advances frame-based tickers (Animate/CreateJS style) one frame at a time', async () => {
+    // 24fps ticker advancing one "frame" per tick, as Animate timelines do; 180 frames = 7.5s.
+    const html = `<!doctype html><body style="margin:0">${box}<script>
+      var frame = 0, el = document.getElementById('box');
+      (function tick() {
+        frame++;
+        if (frame >= 180) { el.style.background = '#0f0'; return; }
+        setTimeout(tick, 1000 / 24);
+      })();
+    </script></body>`;
+    await serve(html, async url => {
+      const result = await captureBackup(url, { width: 40, height: 40 }, { fastForward: true, quality: 95 });
+      assert.strictEqual(result.strategy, 'Virtual time fast-forward');
+      const c = await centerColor(result.buffer);
+      assert.ok(c.g > c.r, `expected green end frame, got rgb(${c.r}, ${c.g}, ${c.b})`);
+    });
+  });
+
+  it('falls back to real-time visual stability when the banner never stops', async () => {
+    const html = `<!doctype html><body style="margin:0">${box}<script>
+      var el = document.getElementById('box'), n = 0;
+      (function loop() { el.style.background = (n++ % 20) < 10 ? '#f00' : '#00f'; requestAnimationFrame(loop); })();
+    </script></body>`;
+    await serve(html, async url => {
+      const result = await captureBackup(url, { width: 40, height: 40 }, { fastForward: true, waitTimeout: 1500, quality: 95 });
+      assert.strictEqual(result.strategy, 'Fallback timeout');
+    });
+  });
+
+  it('captures at the moment a banner sets __backupReady during the fast-forward', async () => {
+    // Ready (green) at 2s, then the banner moves on (blue) at 5s: the contract frame must win.
+    const html = `<!doctype html><body style="margin:0">${box}<script>
+      var el = document.getElementById('box');
+      setTimeout(function () { el.style.background = '#0f0'; window.__backupReady = true; }, 2000);
+      setTimeout(function () { el.style.background = '#00f'; }, 5000);
+    </script></body>`;
+    await serve(html, async url => {
+      const result = await captureBackup(url, { width: 40, height: 40 }, { fastForward: true, quality: 95 });
+      assert.strictEqual(result.strategy, 'Query parameter (?backup=1)');
+      const c = await centerColor(result.buffer);
+      assert.ok(c.g > c.b && c.g > c.r, `expected the green contract frame, got rgb(${c.r}, ${c.g}, ${c.b})`);
+    });
+  });
+
+  it('still prefers an explicit backup hook over fast-forwarding', async () => {
+    const html = `<!doctype html><body style="margin:0">${box}<script>
+      window.generateBackupFrame = function () { document.getElementById('box').style.background = '#0f0'; return true; };
+    </script></body>`;
+    await serve(html, async url => {
+      const result = await captureBackup(url, { width: 40, height: 40 }, { fastForward: true, quality: 95 });
+      assert.strictEqual(result.strategy, 'window.generateBackupFrame()');
+    });
+  });
+});

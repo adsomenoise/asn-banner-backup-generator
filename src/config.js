@@ -6,6 +6,12 @@ export function parseCaptureConcurrency(value, { defaultValue = 3, max = 8 } = {
   return Math.min(parsed, max);
 }
 
+// Virtual-time fast-forward for HTML5 banner ZIPs. On unless explicitly disabled.
+export function getCaptureFastForward(env = process.env) {
+  const value = String(env.CAPTURE_FAST_FORWARD ?? '').trim().toLowerCase();
+  return !['0', 'false', 'off', 'no'].includes(value);
+}
+
 export function getCaptureConcurrency(env = process.env) {
   return parseCaptureConcurrency(env.CAPTURE_CONCURRENCY);
 }

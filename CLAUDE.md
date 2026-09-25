@@ -90,8 +90,10 @@ File:  uploaded → queued → processing → complete | failed
 
 1. `?backup=1` query param + `window.__backupReady = true`
 2. `window.generateBackupFrame()` function call
-3. `window.riveInstance.scrub(MAX_SAFE_INTEGER)`
-4. Fallback: wait `waitTimeout`ms, drain RAF callbacks, hash canvas stability
+3. Rive end state / `window.riveInstance.scrub(MAX_SAFE_INTEGER)` (the Rive state wait only runs when `window.rive` exists)
+4. HTML `<video>` seek to last frame
+5. **Virtual time fast-forward** (`src/capture/virtualClock.js`, HTML5 ZIPs only via `captureBackup({ fastForward: true })`): injected clock owns timers/rAF/`performance.now`/`Date`, plays 30 s frame by frame, and holds CSS/WAAPI animations in step with it. Must stay frame-by-frame; big jumps break GSAP lag smoothing, Motion's delta cap and Animate's frame-per-tick timelines. Don't swap it for Playwright's `page.clock`, which costs ~5 ms per frame (real `setTimeout` yield per timer).
+6. Fallback: real-time visual stability (2 s unchanged, `waitTimeout` hard deadline). Also runs when fast-forward reports `still-moving`.
 
 ### Auth modes
 
@@ -157,6 +159,7 @@ See `.env.example` for full list. Key vars:
 | `PORT` | `3001` | Web server port |
 | `AUTH_MODE` | `development` | `production` requires proxy-injected auth headers |
 | `CAPTURE_CONCURRENCY` | `3` | Max concurrent Playwright captures (1–8) |
+| `CAPTURE_FAST_FORWARD` | on | Virtual-time fast-forward for HTML5 ZIP banners; `false`/`0`/`off` disables it |
 | `RIVE_DEBUG_DIR` | _(unset)_ | Set to save debug HTML/errors on failed captures |
 | `DELIVERY_TIMEZONE` | `Europe/Brussels` | Time zone for the `YYMMDDHHmm` stamp in delivery ZIP names; invalid values fall back to the default |
 | `ADMIN_PASSWORD` | _(required in prod)_ | Password for the built-in login UI |

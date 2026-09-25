@@ -5,6 +5,7 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Virtual-time fast-forward for HTML5 banner ZIPs. The banner's first 30 s play frame by frame under an injected clock, and the end frame is captured in typically under a second (was 3–15 s). It also fixes wrong-frame backups for banners with scene pauses over 2 s. Works with GSAP, Adobe Animate/CreateJS, Motion, anime.js and plain JS/CSS. Falls back to real-time visual stability when a banner is still moving. Disable with `CAPTURE_FAST_FORWARD=false`
 - Download ZIPs are named `<YYMMDDHHmm>_delivery_<common filename prefix>.zip` (e.g. `2609251516_delivery_tel-cons-ns-bingefoot-platforms-w3-display.zip`). Time zone configurable via `DELIVERY_TIMEZONE` (default `Europe/Brussels`). Was: `backup-images-{jobId}.zip`
 - Rive package ZIPs: a ZIP holding one `.riv` plus assets (no HTML) is processed as one Rive creative. The `.riv` becomes `<name>.js`, `<name>.html` is generated next to it, and the other files are kept in `<name>.zip`. Previously it was expanded as a batch and the assets were dropped.
 - Option to download the original creatives together with the backup images in one ZIP: "Also include the original creatives" checkbox in the UI, `GET /api/v1/jobs/{jobId}/download?include=originals` in the API (originals sit next to the backup images at the ZIP root)
@@ -13,6 +14,7 @@ All notable changes to this project are documented here.
 - `FileInfo.warnings[]` field on `FileInfo` model; warnings are surfaced in the frontend per-file list
 
 ### Changed
+- The 1 s Rive end-state wait is skipped for pages without a Rive runtime (`window.rive`)
 - Download cleanup now deferred to TTL (30 min) on transfer interruption — results are preserved for retry if a download is aborted mid-transfer (was: cleaned up on any `res.download` callback, including disconnects)
 - `renderChecks.js` now routes Chromium launch through the browser pool (was: calling `chromium.launch()` directly, risking unbounded process spawning under concurrent validator jobs)
 - Login comparison uses `crypto.timingSafeEqual` (was: `===`)

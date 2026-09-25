@@ -9,7 +9,14 @@ const DEFAULTS = {
   endFrameTimeoutMs: 15000,
   visualStableForMs: 2000,
   visualPollIntervalMs: 250,
-  visualPixelDeltaThreshold: 1
+  visualPixelDeltaThreshold: 1,
+  // Virtual-time fast-forward (HTML5 banners): 30 s covers the IAB/platform
+  // maximum animation length.
+  fastForwardMs: 30000,
+  fastForwardChunkMs: 1000,
+  fastForwardTimeoutMs: 10000,
+  networkQuietMs: 300,
+  networkQuietTimeoutMs: 5000
 };
 
 const DEFAULT_RIVE_END_STATE_NAMES = Object.freeze(['end', 'main_animation_rollout']);
